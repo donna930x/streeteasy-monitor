@@ -9,9 +9,9 @@ class Config:
     defaults = {
         'min_price': 0,
         'max_price': 5000,
-        #'min_beds': 1,
+        'min_beds': 0,
         'max_beds': 1,
-        #'baths': 1,
+        'baths': 1,
         'areas': [
             #'Carroll Gardens',
             #'Clinton Hill',
