@@ -8,35 +8,11 @@ from .utils import build_url, get_datetime, get_area_map
 
 
 class Search:
-    """A search based on the current session, database instance, and keyword arguments for constructing a StreetEasy search URL.
-
-    Attributes:
-        area_map (dict[str, str]): A mapping of StreetEasy's neighborhood names and corresponding codes used for URL construction.
-    """
+    """Constructs a StreetEasy search URL and fetches matching listings."""
 
     area_map: dict[str, str] = get_area_map()
 
     def __init__(self, monitor) -> None:
-        """Initializes the search.
-
-        Args:
-            monitor (Monitor): A Monitor instance encapsulating a session, a database connection, and keyword arguments for constructing a search URL.
-
-        Attributes:
-            session (requests.Session): The session instance.
-            db (Database): The database instance.
-            kwargs (dict[str, str]): The search parameter components.
-            codes (list[str, str]): The StreetEasy neighborhood codes corresponding to selected neighborhood names.
-
-            price (str): The price range component of the search URL.
-            area (str): The neighborhood code component of the search URL.
-            beds (str): The number of beds component of the search URL.
-
-            parameters (dict[str, str]): Dictionary mapping query components for URL construction.
-            url (str): Search URL for the current query.
-            listings (list[dict[str, str]]): Listings corresponding to the current search - initially empty.
-        """
-
         self.session = monitor.session
         self.db = monitor.db
         self.kwargs = monitor.kwargs
@@ -50,6 +26,11 @@ class Search:
         self.amenities = f"{','.join(self.kwargs['amenities'])}"
         self.no_fee = f"{1 if self.kwargs['no_fee'] == True else ''}"
 
+        # Optional params — only included if set in config
+        available_after = self.kwargs.get('available_after', '')   # 'YYYYMMDD'
+        in_rect = self.kwargs.get('in_rect', '')                   # 'lat_min,lat_max,lng_min,lng_max'
+        sqft = self.kwargs.get('sqft', '')                         # e.g. '500-1200'
+        listing_type = self.kwargs.get('listing_type', '')         # e.g. 'rentals'
 
         self.parameters = {
             'status': 'open',
@@ -59,14 +40,21 @@ class Search:
             'baths': self.baths,
             'amenities': self.amenities,
             'no_fee': self.no_fee,
+            # optional — empty strings are filtered out by build_url
+            'available_after': available_after,
+            'in_rect': in_rect,
+            'sqft': sqft,
+            'listing_type': listing_type,
         }
+
+        # Strip params with no value before building the URL
+        self.parameters = {k: v for k, v in self.parameters.items() if v}
 
         self.url = build_url(**self.parameters)
         self.listings = []
 
-    def fetch(self) -> list[dict[str, str]]:
-        """Check the search URL for new listings."""
-        print(f'Running script with parameters:\n{json.dumps(self.parameters, indent=2)}\n')
+    def fetch(self) -> list[dict]:
+        print(f'Running with parameters:\n{json.dumps(self.parameters, indent=2)}\n')
         print(f'URL: {self.url}')
         self.r = self.session.get(self.url)
         if self.r.status_code == 200:
@@ -80,31 +68,13 @@ class Search:
 
 
 class Parser:
-    """Separates parsing functionality from search.
-
-    Attributes:
-        price_pattern (re.Pattern): Regular expression used for stripping commas and dollar signs from listing price.
-    """
-
     price_pattern = re.compile(r'[$,]')
 
     def __init__(self, content: bytes, db) -> None:
-        """Initialize the parse object.
-
-        Args:
-            content (bytes): HTML content of a successful GET request to the search URL.
-            db (Database): Database instance used for fetching listing IDs that already exist in the database.
-
-        Attributes:
-            soup (bs4.BeautifulSoup): Beautiful Soup object for parsing HTML contents.
-            existing_ids (list[str]): Listing IDs that have already been stored in the database.
-        """
-
         self.soup = BeautifulSoup(content, 'html.parser')
         self.existing_ids = db.get_existing_ids()
 
-    def parse(self, card) -> dict[str, str]:
-        """Parse the contents of one listing."""
+    def parse(self, card) -> dict:
         listing_id = card.select_one('div.SRPCarousel-container')['data-listing-id']
         url = card.select_one('a.listingCard-globalLink')['href']
         price = Parser.price_pattern.sub('', card.select_one('span.price').text)
@@ -115,30 +85,40 @@ class Parser:
             .strip()
         )
 
+        # Beds / baths from the search card (best-effort; detail_fetcher fills gaps)
+        beds = 'N/A'
+        baths = 'N/A'
+        details_el = card.select_one('div.listingCardBottom--lowerBlock, p.listingDetailDefinitions')
+        if details_el:
+            text = details_el.get_text(' ', strip=True).lower()
+            bed_m = re.search(r'(\d+)\s*br|(\d+)\s*bed|studio', text)
+            bath_m = re.search(r'(\d+)\s*ba|(\d+)\s*bath', text)
+            if bed_m:
+                beds = 'Studio' if 'studio' in text else (bed_m.group(1) or bed_m.group(2))
+            if bath_m:
+                baths = bath_m.group(1) or bath_m.group(2)
+
         return {
             'listing_id': listing_id,
             'url': url,
             'price': price,
             'address': address,
             'neighborhood': neighborhood,
+            'beds': beds,
+            'baths': baths,
         }
 
     def filter(self, target) -> bool:
-        """Filter a listing based on attributes not captured by StreetEasy's interface natively."""
         if target['listing_id'] in self.existing_ids:
             return False
-
         for key, substrings in Config.filters.items():
             target_value = target.get(key, '')
             if any(substring in target_value for substring in substrings):
                 return False
-
         return True
 
     @property
-    def listings(self) -> dict[str, str]:
-        """Return all parsed and filtered listings."""
+    def listings(self) -> list[dict]:
         cards = self.soup.select('li.searchCardList--listItem')
         parsed = [self.parse(card) for card in cards]
-        filtered = [card for card in parsed if self.filter(card)]
-        return filtered
+        return [card for card in parsed if self.filter(card)]

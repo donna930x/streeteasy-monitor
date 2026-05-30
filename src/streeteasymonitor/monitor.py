@@ -2,7 +2,8 @@ import requests
 
 from src.streeteasymonitor.search import Search
 from src.streeteasymonitor.database import Database
-from src.streeteasymonitor.messager import Messager
+from src.streeteasymonitor.emailer import Emailer
+from src.streeteasymonitor.detail_fetcher import DetailFetcher
 from src.streeteasymonitor.config import Config
 
 
@@ -24,6 +25,10 @@ class Monitor:
 
     def run(self):
         self.search = Search(self)
-        self.listings = self.search.fetch()
-        self.messager = Messager(self, self.listings)
-        self.messager.send_messages()
+        listings = self.search.fetch()
+
+        if listings:
+            fetcher = DetailFetcher(self.session)
+            enriched = [fetcher.fetch(listing) for listing in listings]
+            emailer = Emailer(self, enriched)
+            emailer.send_alerts()
