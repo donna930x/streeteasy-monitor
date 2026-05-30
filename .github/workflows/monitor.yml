@@ -1,0 +1,51 @@
+name: StreetEasy Monitor
+
+on:
+  schedule:
+    # Runs every 20 minutes, 8am–11pm ET (12:00–03:00 UTC next day)
+    # Adjust or simplify to "*/20 * * * *" to run 24/7
+    - cron: '*/20 12-23,0-3 * * *'
+  workflow_dispatch:  # allows manual trigger from the Actions tab
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Restore the SQLite DB from cache so we don't re-alert on seen listings.
+      # Cache key is fixed so it accumulates across runs; bust it manually if needed.
+      - name: Restore listing database
+        uses: actions/cache@v4
+        with:
+          path: data/db.sqlite3
+          key: streeteasy-db-v1
+          restore-keys: |
+            streeteasy-db-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO_EMAIL:     ${{ secrets.ALERT_TO_EMAIL }}
+        run: python main.py
+
+      # Save updated DB back to cache after each run
+      - name: Save listing database
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/db.sqlite3
+          key: streeteasy-db-v1-${{ github.run_id }}
