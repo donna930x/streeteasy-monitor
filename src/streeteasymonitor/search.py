@@ -120,5 +120,6 @@ class Parser:
     @property
     def listings(self) -> list[dict]:
         cards = self.soup.select('li.searchCardList--listItem')
+        print(f'Cards found: {len(cards)}')  # add this
         parsed = [self.parse(card) for card in cards]
         return [card for card in parsed if self.filter(card)]
