@@ -22,9 +22,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/db.sqlite3
-          key: streeteasy-db-v1
+          key: streeteasy-db-v2
           restore-keys: |
-            streeteasy-db-
+            streeteasy-db-v2-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -51,4 +51,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: data/db.sqlite3
-          key: streeteasy-db-v1-${{ github.run_id }}
+          key: streeteasy-db-v2-${{ github.run_id }}

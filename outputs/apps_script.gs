@@ -62,13 +62,28 @@ function doPost(e) {
 
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
 
-    // --- header row (write once) ---
-    if (sheet.getLastRow() === 0) {
-      var header = ['Date Added'].concat(
-        fields.map(function (f) { return LABELS[f] || f; })
-      );
-      sheet.appendRow(header);
-      sheet.getRange(1, 1, 1, header.length).setFontWeight('bold');
+    // --- header: self-healing -------------------------------------------
+    // Expected header is derived from the fields the client sends. If the
+    // sheet is empty OR its current header doesn't match (columns were added
+    // / reordered), wipe it and rewrite. This prevents stale-header column
+    // misalignment (e.g. a date bleeding into the Price column) without the
+    // user ever having to clear the sheet by hand.
+    var expected = ['Date Added'].concat(
+      fields.map(function (f) { return LABELS[f] || f; })
+    );
+
+    var needsReset = true;
+    if (sheet.getLastRow() >= 1) {
+      var cur = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      needsReset = (cur.length !== expected.length);
+      for (var h = 0; !needsReset && h < expected.length; h++) {
+        if (String(cur[h]) !== String(expected[h])) needsReset = true;
+      }
+    }
+    if (needsReset) {
+      sheet.clear();                       // clears contents AND formats
+      sheet.appendRow(expected);
+      sheet.getRange(1, 1, 1, expected.length).setFontWeight('bold');
       sheet.setFrozenRows(1);
     }
 
