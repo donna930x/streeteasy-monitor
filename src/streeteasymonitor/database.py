@@ -27,7 +27,10 @@ class Database:
                     baths TEXT,
                     days_listed TEXT,
                     date_available TEXT,
-                    contacts TEXT
+                    contacts TEXT,
+                    contact_name TEXT,
+                    contact_company TEXT,
+                    contact_phone TEXT
                 )
             """)
             # Add columns if upgrading from the original schema (no-op if already exist)
@@ -37,6 +40,9 @@ class Database:
                 ('days_listed', 'TEXT'),
                 ('date_available', 'TEXT'),
                 ('contacts', 'TEXT'),
+                ('contact_name', 'TEXT'),
+                ('contact_company', 'TEXT'),
+                ('contact_phone', 'TEXT'),
             ]:
                 try:
                     cursor.execute(f'ALTER TABLE listings ADD COLUMN {col} {col_type}')
@@ -60,7 +66,8 @@ class Database:
     def insert_new_listing(self, listing: dict):
         # Only persist columns that exist in the schema
         allowed = {'listing_id', 'url', 'price', 'address', 'neighborhood',
-                   'beds', 'baths', 'days_listed', 'date_available', 'contacts'}
+                   'beds', 'baths', 'days_listed', 'date_available', 'contacts',
+                   'contact_name', 'contact_company', 'contact_phone'}
         filtered = {k: v for k, v in listing.items() if k in allowed}
         columns = ', '.join(filtered.keys())
         placeholders = ', '.join('?' * len(filtered))

@@ -52,6 +52,9 @@ class DetailFetcher:
             'days_listed': 'N/A',
             'date_available': 'N/A',
             'contacts': 'N/A',
+            'contact_name': 'N/A',
+            'contact_company': 'N/A',
+            'contact_phone': 'N/A',
             'detail_url': url,
         }
 
@@ -96,35 +99,53 @@ class DetailFetcher:
         if days is not None:
             result['days_listed'] = str(days)
 
-        # --- contact (name / company / phone) --------------------------
-        result['contacts'] = self._build_contacts(text, raw, flight_text, flight)
+        # --- contact (name / company / phone in separate fields) -------
+        name, company, phone = self._extract_contact(text, raw, flight_text, flight)
+        result['contact_name'] = name or 'N/A'
+        result['contact_company'] = company or 'N/A'
+        result['contact_phone'] = phone or 'N/A'
+        # keep a combined string too, for backward compatibility
+        joined = ' · '.join(p for p in (name, company, phone) if p)
+        result['contacts'] = joined or 'N/A'
 
         return result
 
     # ------------------------------------------------------------------ #
     # Contact assembly
     # ------------------------------------------------------------------ #
-    def _build_contacts(self, text, raw, flight_text, flight) -> str:
-        # 1. name / company lines from the rendered "Listed by" block
-        parts = self._listed_by_lines(text)
+    def _extract_contact(self, text, raw, flight_text, flight):
+        """Return a (name, company, phone) tuple, each '' if not found.
 
-        # fall back to Flight source/agent name if the block wasn't rendered
-        if not parts:
-            for key in ('sourceGroupLabel', 'agentName', 'brokerName', 'contactName'):
+        Name + company come from the rendered "Listed by" block (first two
+        non-noise lines), with a Flight-payload fallback. Phone always comes
+        from page source — never the rendered "Show phone number" button.
+        """
+        # 1. name / company lines from the rendered "Listed by" block
+        lines = self._listed_by_lines(text)
+        name = lines[0] if len(lines) >= 1 else ''
+        company = lines[1] if len(lines) >= 2 else ''
+
+        # fall back to Flight fields if the block wasn't rendered
+        if not name:
+            for key in ('contactName', 'agentName'):
                 v = flight.get(key)
-                if v and str(v) not in parts:
-                    parts.append(str(v))
+                if v:
+                    name = str(v)
+                    break
+        if not company:
+            for key in ('sourceGroupLabel', 'brokerName', 'agentName'):
+                v = flight.get(key)
+                if v and str(v) != name:
+                    company = str(v)
+                    break
 
         # 2. phone — never from rendered text (it's behind a button); always
         #    from source: tel: link, then phone-keyed JSON fields.
         phone = self._phone_from_source(raw, flight_text, flight)
         if not phone:
             phone = self._phone_from_text(text)
-        if phone:
-            parts.append(phone)
 
-        parts = [p for p in dict.fromkeys(parts) if p]
-        return ' · '.join(parts[:4]) if parts else 'N/A'
+        return name, company, phone
 
     def _listed_by_lines(self, text) -> list:
         lines = [l.strip() for l in text.split('\n') if l.strip()]
