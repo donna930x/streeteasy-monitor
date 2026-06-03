@@ -12,6 +12,7 @@ Env vars:
 """
 
 import os
+import re
 
 import requests
 
@@ -26,12 +27,17 @@ SHEET_FIELDS = [
     'price',
     'beds',
     'baths',
+    'laundry',
+    'elevator',
+    'doorman',
     'date_available',
     'days_listed',
-    'contact_name',
+    'contact_first',
+    'contact_last',
     'contact_company',
     'contact_phone',
     'url',
+    'message',
     'listing_id',
 ]
 
@@ -48,7 +54,55 @@ class SheetsWriter:
         return bool(self.url and self.secret)
 
     @staticmethod
-    def _row(listing: dict) -> dict:
+    def _split_name(name: str):
+        """('Jane Q Broker') -> ('Jane', 'Q Broker'). One word -> ('', '')."""
+        name = (name or '').strip()
+        if not name or name == 'N/A':
+            return '', ''
+        parts = name.split()
+        if len(parts) == 1:
+            return parts[0], ''
+        return parts[0], ' '.join(parts[1:])
+
+    @staticmethod
+    def _street_without_unit(listing: dict) -> str:
+        """Street address with the unit number removed."""
+        street = (listing.get('street') or '').strip()
+        if street:
+            return street
+        # Fall back: strip a trailing unit token off the full address.
+        addr = (listing.get('address') or '').strip()
+        unit = (listing.get('unit') or '').strip()
+        if unit and addr.endswith(unit):
+            addr = addr[: -len(unit)].strip()
+        else:
+            # e.g. "325 Kent Ave 5B" / "12 Main St #4F" / "5 E 22 St Apt 3"
+            addr = re.sub(
+                r'\s+(?:#|apt\.?|unit|ph)?\s*[\w\-]*\d[\w\-]*$', '', addr, flags=re.I
+            ).strip()
+        return addr or listing.get('address', 'N/A')
+
+    @classmethod
+    def _build_message(cls, listing: dict, first: str) -> str:
+        """A copy-paste viewing-request message for the listing."""
+        greeting_name = first or 'there'
+        street = cls._street_without_unit(listing)
+        avail = (listing.get('date_available') or '').strip()
+        if avail in ('Now', 'Today'):
+            unit_clause = 'the unit available now'
+        elif avail and avail != 'N/A':
+            unit_clause = f'the unit available starting {avail}'
+        else:
+            unit_clause = 'the unit'
+        return (
+            f"Hi {greeting_name}\n\n"
+            f"I'm very interested in {unit_clause} at {street}. "
+            f"Please let me know when the unit would be available for a viewing.\n\n"
+            f"Thank you!\nDonnya"
+        )
+
+    @classmethod
+    def _row(cls, listing: dict) -> dict:
         """Normalize a listing into the exact keys the sheet expects."""
         url = listing.get('detail_url') or listing.get('url', '')
         if url and not url.startswith('http'):
@@ -61,18 +115,25 @@ class SheetsWriter:
         except (TypeError, ValueError):
             pass
 
+        first, last = cls._split_name(listing.get('contact_name', ''))
+
         return {
             'address': listing.get('address', 'N/A'),
             'neighborhood': listing.get('neighborhood', 'N/A'),
             'price': price,
             'beds': listing.get('beds', 'N/A'),
             'baths': listing.get('baths', 'N/A'),
+            'laundry': listing.get('laundry', 'N/A'),
+            'elevator': listing.get('elevator', 'N/A'),
+            'doorman': listing.get('doorman', 'N/A'),
             'date_available': listing.get('date_available', 'N/A'),
             'days_listed': listing.get('days_listed', 'N/A'),
-            'contact_name': listing.get('contact_name', 'N/A'),
+            'contact_first': first or 'N/A',
+            'contact_last': last or 'N/A',
             'contact_company': listing.get('contact_company', 'N/A'),
             'contact_phone': listing.get('contact_phone', 'N/A'),
             'url': url,
+            'message': cls._build_message(listing, first),
             'listing_id': listing.get('listing_id', url),
         }
 

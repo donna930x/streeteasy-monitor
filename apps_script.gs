@@ -30,12 +30,17 @@ var LABELS = {
   price: 'Price',
   beds: 'Beds',
   baths: 'Baths',
+  laundry: 'Laundry',
+  elevator: 'Elevator',
+  doorman: 'Doorman',
   date_available: 'Available',
   days_listed: 'Days on Market',
-  contact_name: 'Contact Name',
+  contact_first: 'Contact First',
+  contact_last: 'Contact Last',
   contact_company: 'Contact Company',
   contact_phone: 'Contact Phone',
   url: 'Listing',          // rendered as a clickable HYPERLINK
+  message: 'Message',      // copy-paste viewing request
   listing_id: 'Listing ID' // dedup key, kept last
 };
 

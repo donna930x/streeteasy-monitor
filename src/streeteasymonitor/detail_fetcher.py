@@ -55,6 +55,9 @@ class DetailFetcher:
             'contact_name': 'N/A',
             'contact_company': 'N/A',
             'contact_phone': 'N/A',
+            'laundry': 'N/A',
+            'elevator': 'N/A',
+            'doorman': 'N/A',
             'detail_url': url,
         }
 
@@ -91,13 +94,29 @@ class DetailFetcher:
         avail = self._available_from_text(text) or self._iso_to_us(flight.get('availableAt'))
         if avail:
             result['date_available'] = avail
+        available_now = avail == 'Now' or bool(
+            re.search(r'available\s+(?:today|now|immediately)', text, re.I)
+        )
 
         # --- days on market --------------------------------------------
         days = self._days_from_text(text)
         if days is None:
             days = self._days_from_flight(flight)
+        # Reject implausible values (e.g. a stray year like 2026 captured by a
+        # loose match) — real days-on-market is small and never negative.
+        if days is not None and not (0 <= days <= 3650):
+            days = None
+        # A unit available today/now hasn't been on market — call it 0.
+        if days is None and available_now:
+            days = 0
         if days is not None:
             result['days_listed'] = str(days)
+
+        # --- amenities (laundry / elevator / doorman) ------------------
+        laundry, elevator, doorman = self._extract_amenities(text)
+        result['laundry'] = laundry
+        result['elevator'] = elevator
+        result['doorman'] = doorman
 
         # --- contact (name / company / phone in separate fields) -------
         name, company, phone = self._extract_contact(text, raw, flight_text, flight)
@@ -200,12 +219,17 @@ class DetailFetcher:
 
     @staticmethod
     def _format_phone(s) -> str:
+        """Return a plain 10-digit string, e.g. '7186827712'.
+
+        No '+', spaces, or parens — a leading '+' makes Google Sheets treat the
+        cell as a formula and error out.
+        """
         d = re.sub(r'\D', '', str(s))
         if len(d) == 11 and d[0] == '1':
             d = d[1:]
         if len(d) == 10:
-            return f'+1 ({d[0:3]}) {d[3:6]}-{d[6:10]}'
-        return str(s).strip()
+            return d
+        return d or str(s).strip()
 
     # ------------------------------------------------------------------ #
     # Flight payload helpers
@@ -294,6 +318,46 @@ class DetailFetcher:
         return None
 
     # ------------------------------------------------------------------ #
+    # Amenities
+    # ------------------------------------------------------------------ #
+    def _extract_amenities(self, text):
+        """Return (laundry, elevator, doorman) from the rendered amenity lists.
+
+        StreetEasy only renders amenities a listing *has*, so presence-matching
+        on the visible text is reliable.
+          - laundry:  'In unit' | 'In building' | 'None'
+          - elevator: 'Yes' | 'No'
+          - doorman:  'Virtual' | 'Yes' | 'No'
+        """
+        hay = text.lower()
+
+        in_unit = bool(
+            re.search(r'(?:washer\s*/?\s*dryer|laundry)[^.\n]{0,15}in[\s-]*unit', hay)
+            or re.search(r'in[\s-]*unit[^.\n]{0,15}(?:washer|dryer|laundry)', hay)
+        )
+        in_building = bool(
+            re.search(r'laundry[^.\n]{0,15}in[\s-]*building', hay)
+            or 'laundry in building' in hay
+        )
+        if in_unit:
+            laundry = 'In unit'
+        elif in_building:
+            laundry = 'In building'
+        else:
+            laundry = 'None'
+
+        elevator = 'Yes' if re.search(r'\belevator\b', hay) else 'No'
+
+        if re.search(r'virtual\s+doorman', hay):
+            doorman = 'Virtual'
+        elif re.search(r'\bdoorman\b', hay):
+            doorman = 'Yes'
+        else:
+            doorman = 'No'
+
+        return laundry, elevator, doorman
+
+    # ------------------------------------------------------------------ #
     # Rendered-text helpers
     # ------------------------------------------------------------------ #
     def _available_from_text(self, text) -> str:
@@ -305,7 +369,7 @@ class DetailFetcher:
                       r'([A-Z][a-z]+\.?\s+\d{1,2}(?:,\s*\d{4})?)', text, re.I | re.S)
         if m:
             return m.group(1).strip()
-        if re.search(r'available\s+(?:now|immediately)', text, re.I):
+        if re.search(r'available\s+(?:now|immediately|today)', text, re.I):
             return 'Now'
         return ''
 

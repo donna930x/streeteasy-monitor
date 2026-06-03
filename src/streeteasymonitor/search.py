@@ -197,6 +197,8 @@ class Parser:
                     'url': url,
                     'price': str(data.get('price')),
                     'address': address,
+                    'street': street or address,             # without the unit #
+                    'unit': unit,
                     'neighborhood': data.get('areaName') or 'N/A',
                     'beds': beds,
                     'baths': baths,
@@ -320,6 +322,8 @@ class Parser:
                     'url': url,
                     'price': price,
                     'address': address,
+                    'street': address,   # unit not separable from rendered DOM
+                    'unit': '',
                     'neighborhood': neighborhood,
                     'beds': beds,
                     'baths': baths,

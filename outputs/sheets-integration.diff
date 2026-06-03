@@ -1,518 +1,317 @@
+diff --git a/apps_script.gs b/apps_script.gs
+index 82703e3..b09633b 100644
+--- a/apps_script.gs
++++ b/apps_script.gs
+@@ -30,12 +30,17 @@ var LABELS = {
+   price: 'Price',
+   beds: 'Beds',
+   baths: 'Baths',
++  laundry: 'Laundry',
++  elevator: 'Elevator',
++  doorman: 'Doorman',
+   date_available: 'Available',
+   days_listed: 'Days on Market',
+-  contact_name: 'Contact Name',
++  contact_first: 'Contact First',
++  contact_last: 'Contact Last',
+   contact_company: 'Contact Company',
+   contact_phone: 'Contact Phone',
+   url: 'Listing',          // rendered as a clickable HYPERLINK
++  message: 'Message',      // copy-paste viewing request
+   listing_id: 'Listing ID' // dedup key, kept last
+ };
+ 
 diff --git a/src/streeteasymonitor/database.py b/src/streeteasymonitor/database.py
-index f7336b8..fdae793 100644
+index fdae793..3f949ef 100644
 --- a/src/streeteasymonitor/database.py
 +++ b/src/streeteasymonitor/database.py
-@@ -27,7 +27,10 @@ class Database:
-                     baths TEXT,
-                     days_listed TEXT,
-                     date_available TEXT,
--                    contacts TEXT
-+                    contacts TEXT,
-+                    contact_name TEXT,
-+                    contact_company TEXT,
-+                    contact_phone TEXT
+@@ -30,7 +30,10 @@ class Database:
+                     contacts TEXT,
+                     contact_name TEXT,
+                     contact_company TEXT,
+-                    contact_phone TEXT
++                    contact_phone TEXT,
++                    laundry TEXT,
++                    elevator TEXT,
++                    doorman TEXT
                  )
              """)
              # Add columns if upgrading from the original schema (no-op if already exist)
-@@ -37,6 +40,9 @@ class Database:
-                 ('days_listed', 'TEXT'),
-                 ('date_available', 'TEXT'),
-                 ('contacts', 'TEXT'),
-+                ('contact_name', 'TEXT'),
-+                ('contact_company', 'TEXT'),
-+                ('contact_phone', 'TEXT'),
+@@ -43,6 +46,9 @@ class Database:
+                 ('contact_name', 'TEXT'),
+                 ('contact_company', 'TEXT'),
+                 ('contact_phone', 'TEXT'),
++                ('laundry', 'TEXT'),
++                ('elevator', 'TEXT'),
++                ('doorman', 'TEXT'),
              ]:
                  try:
                      cursor.execute(f'ALTER TABLE listings ADD COLUMN {col} {col_type}')
-@@ -60,7 +66,8 @@ class Database:
-     def insert_new_listing(self, listing: dict):
+@@ -67,7 +73,8 @@ class Database:
          # Only persist columns that exist in the schema
          allowed = {'listing_id', 'url', 'price', 'address', 'neighborhood',
--                   'beds', 'baths', 'days_listed', 'date_available', 'contacts'}
-+                   'beds', 'baths', 'days_listed', 'date_available', 'contacts',
-+                   'contact_name', 'contact_company', 'contact_phone'}
+                    'beds', 'baths', 'days_listed', 'date_available', 'contacts',
+-                   'contact_name', 'contact_company', 'contact_phone'}
++                   'contact_name', 'contact_company', 'contact_phone',
++                   'laundry', 'elevator', 'doorman'}
          filtered = {k: v for k, v in listing.items() if k in allowed}
          columns = ', '.join(filtered.keys())
          placeholders = ', '.join('?' * len(filtered))
 diff --git a/src/streeteasymonitor/detail_fetcher.py b/src/streeteasymonitor/detail_fetcher.py
-index 3c6bdcb..8509b0b 100644
+index 8509b0b..65feef2 100644
 --- a/src/streeteasymonitor/detail_fetcher.py
 +++ b/src/streeteasymonitor/detail_fetcher.py
-@@ -52,6 +52,9 @@ class DetailFetcher:
-             'days_listed': 'N/A',
-             'date_available': 'N/A',
-             'contacts': 'N/A',
-+            'contact_name': 'N/A',
-+            'contact_company': 'N/A',
-+            'contact_phone': 'N/A',
+@@ -55,6 +55,9 @@ class DetailFetcher:
+             'contact_name': 'N/A',
+             'contact_company': 'N/A',
+             'contact_phone': 'N/A',
++            'laundry': 'N/A',
++            'elevator': 'N/A',
++            'doorman': 'N/A',
              'detail_url': url,
          }
  
-@@ -96,35 +99,53 @@ class DetailFetcher:
+@@ -91,14 +94,30 @@ class DetailFetcher:
+         avail = self._available_from_text(text) or self._iso_to_us(flight.get('availableAt'))
+         if avail:
+             result['date_available'] = avail
++        available_now = avail == 'Now' or bool(
++            re.search(r'available\s+(?:today|now|immediately)', text, re.I)
++        )
+ 
+         # --- days on market --------------------------------------------
+         days = self._days_from_text(text)
+         if days is None:
+             days = self._days_from_flight(flight)
++        # Reject implausible values (e.g. a stray year like 2026 captured by a
++        # loose match) — real days-on-market is small and never negative.
++        if days is not None and not (0 <= days <= 3650):
++            days = None
++        # A unit available today/now hasn't been on market — call it 0.
++        if days is None and available_now:
++            days = 0
          if days is not None:
              result['days_listed'] = str(days)
  
--        # --- contact (name / company / phone) --------------------------
--        result['contacts'] = self._build_contacts(text, raw, flight_text, flight)
-+        # --- contact (name / company / phone in separate fields) -------
-+        name, company, phone = self._extract_contact(text, raw, flight_text, flight)
-+        result['contact_name'] = name or 'N/A'
-+        result['contact_company'] = company or 'N/A'
-+        result['contact_phone'] = phone or 'N/A'
-+        # keep a combined string too, for backward compatibility
-+        joined = ' · '.join(p for p in (name, company, phone) if p)
-+        result['contacts'] = joined or 'N/A'
- 
-         return result
- 
-     # ------------------------------------------------------------------ #
-     # Contact assembly
-     # ------------------------------------------------------------------ #
--    def _build_contacts(self, text, raw, flight_text, flight) -> str:
-+    def _extract_contact(self, text, raw, flight_text, flight):
-+        """Return a (name, company, phone) tuple, each '' if not found.
++        # --- amenities (laundry / elevator / doorman) ------------------
++        laundry, elevator, doorman = self._extract_amenities(text)
++        result['laundry'] = laundry
++        result['elevator'] = elevator
++        result['doorman'] = doorman
 +
-+        Name + company come from the rendered "Listed by" block (first two
-+        non-noise lines), with a Flight-payload fallback. Phone always comes
-+        from page source — never the rendered "Show phone number" button.
+         # --- contact (name / company / phone in separate fields) -------
+         name, company, phone = self._extract_contact(text, raw, flight_text, flight)
+         result['contact_name'] = name or 'N/A'
+@@ -200,12 +219,17 @@ class DetailFetcher:
+ 
+     @staticmethod
+     def _format_phone(s) -> str:
++        """Return a plain 10-digit string, e.g. '7186827712'.
++
++        No '+', spaces, or parens — a leading '+' makes Google Sheets treat the
++        cell as a formula and error out.
 +        """
-         # 1. name / company lines from the rendered "Listed by" block
--        parts = self._listed_by_lines(text)
-+        lines = self._listed_by_lines(text)
-+        name = lines[0] if len(lines) >= 1 else ''
-+        company = lines[1] if len(lines) >= 2 else ''
+         d = re.sub(r'\D', '', str(s))
+         if len(d) == 11 and d[0] == '1':
+             d = d[1:]
+         if len(d) == 10:
+-            return f'+1 ({d[0:3]}) {d[3:6]}-{d[6:10]}'
+-        return str(s).strip()
++            return d
++        return d or str(s).strip()
  
--        # fall back to Flight source/agent name if the block wasn't rendered
--        if not parts:
--            for key in ('sourceGroupLabel', 'agentName', 'brokerName', 'contactName'):
-+        # fall back to Flight fields if the block wasn't rendered
-+        if not name:
-+            for key in ('contactName', 'agentName'):
-+                v = flight.get(key)
-+                if v:
-+                    name = str(v)
-+                    break
-+        if not company:
-+            for key in ('sourceGroupLabel', 'brokerName', 'agentName'):
-                 v = flight.get(key)
--                if v and str(v) not in parts:
--                    parts.append(str(v))
-+                if v and str(v) != name:
-+                    company = str(v)
-+                    break
+     # ------------------------------------------------------------------ #
+     # Flight payload helpers
+@@ -293,6 +317,46 @@ class DetailFetcher:
+                 return (date.today() - d).days
+         return None
  
-         # 2. phone — never from rendered text (it's behind a button); always
-         #    from source: tel: link, then phone-keyed JSON fields.
-         phone = self._phone_from_source(raw, flight_text, flight)
-         if not phone:
-             phone = self._phone_from_text(text)
--        if phone:
--            parts.append(phone)
- 
--        parts = [p for p in dict.fromkeys(parts) if p]
--        return ' · '.join(parts[:4]) if parts else 'N/A'
-+        return name, company, phone
- 
-     def _listed_by_lines(self, text) -> list:
-         lines = [l.strip() for l in text.split('\n') if l.strip()]
-diff --git a/src/streeteasymonitor/emailer.py b/src/streeteasymonitor/emailer.py
-index 7f9c719..09c4bc9 100644
---- a/src/streeteasymonitor/emailer.py
-+++ b/src/streeteasymonitor/emailer.py
-@@ -1,9 +1,18 @@
- """
--Sends a single digest email for all new listings via Gmail SMTP.
--One email per run, with each listing as a card in the HTML body.
-+Sends a single summary email per run via Gmail SMTP.
++    # ------------------------------------------------------------------ #
++    # Amenities
++    # ------------------------------------------------------------------ #
++    def _extract_amenities(self, text):
++        """Return (laundry, elevator, doorman) from the rendered amenity lists.
 +
-+The email no longer lists each listing — the Google Sheet is the system of
-+record. It just says "N new listings added" and links to the sheet so you can
-+open it with one click.
- 
- Requires a Gmail App Password — not your regular Gmail password.
- See: https://myaccount.google.com/apppasswords
++        StreetEasy only renders amenities a listing *has*, so presence-matching
++        on the visible text is reliable.
++          - laundry:  'In unit' | 'In building' | 'None'
++          - elevator: 'Yes' | 'No'
++          - doorman:  'Virtual' | 'Yes' | 'No'
++        """
++        hay = text.lower()
 +
-+Env vars:
-+  GMAIL_ADDRESS        — sending Gmail account
-+  GMAIL_APP_PASSWORD   — 16-char app password
-+  ALERT_TO_EMAIL       — where the summary goes
-+  SHEET_URL            — link to the Google Sheet (shown/linked in the email)
++        in_unit = bool(
++            re.search(r'(?:washer\s*/?\s*dryer|laundry)[^.\n]{0,15}in[\s-]*unit', hay)
++            or re.search(r'in[\s-]*unit[^.\n]{0,15}(?:washer|dryer|laundry)', hay)
++        )
++        in_building = bool(
++            re.search(r'laundry[^.\n]{0,15}in[\s-]*building', hay)
++            or 'laundry in building' in hay
++        )
++        if in_unit:
++            laundry = 'In unit'
++        elif in_building:
++            laundry = 'In building'
++        else:
++            laundry = 'None'
++
++        elevator = 'Yes' if re.search(r'\belevator\b', hay) else 'No'
++
++        if re.search(r'virtual\s+doorman', hay):
++            doorman = 'Virtual'
++        elif re.search(r'\bdoorman\b', hay):
++            doorman = 'Yes'
++        else:
++            doorman = 'No'
++
++        return laundry, elevator, doorman
++
+     # ------------------------------------------------------------------ #
+     # Rendered-text helpers
+     # ------------------------------------------------------------------ #
+@@ -305,7 +369,7 @@ class DetailFetcher:
+                       r'([A-Z][a-z]+\.?\s+\d{1,2}(?:,\s*\d{4})?)', text, re.I | re.S)
+         if m:
+             return m.group(1).strip()
+-        if re.search(r'available\s+(?:now|immediately)', text, re.I):
++        if re.search(r'available\s+(?:now|immediately|today)', text, re.I):
+             return 'Now'
+         return ''
+ 
+diff --git a/src/streeteasymonitor/search.py b/src/streeteasymonitor/search.py
+index e40cf79..f1f2b97 100644
+--- a/src/streeteasymonitor/search.py
++++ b/src/streeteasymonitor/search.py
+@@ -197,6 +197,8 @@ class Parser:
+                     'url': url,
+                     'price': str(data.get('price')),
+                     'address': address,
++                    'street': street or address,             # without the unit #
++                    'unit': unit,
+                     'neighborhood': data.get('areaName') or 'N/A',
+                     'beds': beds,
+                     'baths': baths,
+@@ -320,6 +322,8 @@ class Parser:
+                     'url': url,
+                     'price': price,
+                     'address': address,
++                    'street': address,   # unit not separable from rendered DOM
++                    'unit': '',
+                     'neighborhood': neighborhood,
+                     'beds': beds,
+                     'baths': baths,
+diff --git a/src/streeteasymonitor/sheets_writer.py b/src/streeteasymonitor/sheets_writer.py
+index dfdd856..33ac58e 100644
+--- a/src/streeteasymonitor/sheets_writer.py
++++ b/src/streeteasymonitor/sheets_writer.py
+@@ -12,6 +12,7 @@ Env vars:
  """
  
  import os
-@@ -14,110 +23,50 @@ from email.mime.text import MIMEText
- from .utils import get_datetime
++import re
  
+ import requests
  
--CARD_STYLE = (
--    "font-family:Arial,sans-serif;max-width:600px;margin:0 auto 24px;"
--    "border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;"
--)
--HEADER_STYLE = (
--    "background:#1a1a2e;color:#ffffff;padding:12px 16px;"
--    "font-size:18px;font-weight:bold;"
-+BTN_STYLE = (
-+    "display:inline-block;background:#1a1a2e;color:#ffffff;text-decoration:none;"
-+    "padding:12px 22px;border-radius:8px;font-size:15px;font-weight:bold;"
- )
--ROW_STYLE = "display:flex;padding:8px 16px;border-bottom:1px solid #f0f0f0;"
--LABEL_STYLE = "color:#666;font-size:13px;width:130px;flex-shrink:0;padding-top:2px;"
--VALUE_STYLE = "color:#1a1a2e;font-size:14px;font-weight:500;"
--LINK_STYLE = "color:#0066cc;text-decoration:none;font-size:14px;"
--
--
--def _listing_card(listing: dict) -> str:
--    price = f"${int(listing.get('price', 0)):,}" if listing.get('price') else 'N/A'
--    beds = listing.get('beds', 'N/A')
--    baths = listing.get('baths', 'N/A')
--    beds_baths = f"{beds} bed / {baths} bath"
--    neighborhood = listing.get('neighborhood', 'N/A')
--    days = listing.get('days_listed', 'N/A')
--    days_label = f"{days} day{'s' if days not in ('0', '1', 'N/A') else ''} on market"
--    date_avail = listing.get('date_available', 'N/A')
--    contacts = listing.get('contacts', 'N/A')
--    url = listing.get('detail_url') or listing.get('url', '')
--    address = listing.get('address', 'Unknown address')
--
--    if url and not url.startswith('http'):
--        url = f'https://streeteasy.com{url}'
--
--    rows = [
--        ('Price', price),
--        ('Beds / Baths', beds_baths),
--        ('Neighborhood', neighborhood),
--        ('Days Listed', days_label),
--        ('Date Available', date_avail),
--        ('Contact', contacts),
--    ]
+@@ -26,12 +27,17 @@ SHEET_FIELDS = [
+     'price',
+     'beds',
+     'baths',
++    'laundry',
++    'elevator',
++    'doorman',
+     'date_available',
+     'days_listed',
+-    'contact_name',
++    'contact_first',
++    'contact_last',
+     'contact_company',
+     'contact_phone',
+     'url',
++    'message',
+     'listing_id',
+ ]
  
--    row_html = ''.join(
--        f'<div style="{ROW_STYLE}">'
--        f'<span style="{LABEL_STYLE}">{label}</span>'
--        f'<span style="{VALUE_STYLE}">{value}</span>'
--        f'</div>'
--        for label, value in rows
--    )
+@@ -48,7 +54,55 @@ class SheetsWriter:
+         return bool(self.url and self.secret)
  
--    view_link = (
--        f'<div style="padding:12px 16px;">'
--        f'<a href="{url}" style="{LINK_STYLE}">View listing →</a>'
--        f'</div>'
--        if url else ''
--    )
--
--    return (
--        f'<div style="{CARD_STYLE}">'
--        f'<div style="{HEADER_STYLE}">{address}</div>'
--        f'{row_html}'
--        f'{view_link}'
--        f'</div>'
-+def _build_html(count: int, sheet_url: str) -> str:
-+    plural = 's' if count != 1 else ''
-+    button = (
-+        f'<a href="{sheet_url}" style="{BTN_STYLE}">Open the spreadsheet →</a>'
-+        if sheet_url else ''
-     )
-+    return f"""\
-+<!DOCTYPE html>
-+<html>
-+<body style="background:#f5f5f5;padding:24px;margin:0;">
-+  <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;
-+              background:#ffffff;border:1px solid #e0e0e0;border-radius:8px;
-+              padding:32px;text-align:center;">
-+    <h2 style="color:#1a1a2e;margin:0 0 8px;">
-+      🏠 {count} new StreetEasy listing{plural}
-+    </h2>
-+    <p style="color:#666;font-size:14px;margin:0 0 24px;">
-+      Added to your tracking spreadsheet — {get_datetime()}
-+    </p>
-+    {button}
-+    <p style="color:#aaa;font-size:11px;margin-top:28px;">
-+      Sent by your StreetEasy monitor
-+    </p>
-+  </div>
-+</body>
-+</html>
-+"""
- 
- 
--def _build_html(listings: list[dict]) -> str:
--    count = len(listings)
-+def _build_plain(count: int, sheet_url: str) -> str:
-     plural = 's' if count != 1 else ''
--    cards = '\n'.join(_listing_card(l) for l in listings)
--    return f"""
--    <!DOCTYPE html>
--    <html>
--    <body style="background:#f5f5f5;padding:24px;margin:0;">
--      <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;">
--        <h2 style="color:#1a1a2e;margin-bottom:4px;">
--          🏠 {count} New StreetEasy Listing{plural}
--        </h2>
--        <p style="color:#666;font-size:13px;margin-top:0;margin-bottom:24px;">
--          {get_datetime()} — matches your saved filters
--        </p>
--        {cards}
--        <p style="color:#aaa;font-size:11px;text-align:center;margin-top:32px;">
--          Sent by your StreetEasy monitor ·
--          <a href="https://streeteasy.com" style="color:#aaa;">streeteasy.com</a>
--        </p>
--      </div>
--    </body>
--    </html>
--    """
--
--
--def _build_plain(listings: list[dict]) -> str:
--    lines = [f"New StreetEasy listings — {get_datetime()}\n"]
--    for l in listings:
--        price = f"${int(l.get('price', 0)):,}" if l.get('price') else 'N/A'
--        url = l.get('detail_url') or l.get('url', '')
--        if url and not url.startswith('http'):
--            url = f'https://streeteasy.com{url}'
--        lines.append(
--            f"{l.get('address', 'Unknown')} | {l.get('neighborhood', 'N/A')} | "
--            f"{price} | {l.get('beds', 'N/A')} bed / {l.get('baths', 'N/A')} bath | "
--            f"Available: {l.get('date_available', 'N/A')} | "
--            f"Days listed: {l.get('days_listed', 'N/A')}\n"
--            f"Contact: {l.get('contacts', 'N/A')}\n"
--            f"{url}\n"
--        )
-+    lines = [
-+        f"{count} new StreetEasy listing{plural} added to your spreadsheet "
-+        f"— {get_datetime()}",
-+    ]
-+    if sheet_url:
-+        lines.append('')
-+        lines.append(f"Open the spreadsheet: {sheet_url}")
-     return '\n'.join(lines)
- 
- 
-@@ -125,15 +74,15 @@ class Emailer:
-     SMTP_HOST = 'smtp.gmail.com'
-     SMTP_PORT = 587
- 
--    def __init__(self, monitor, listings: list[dict]):
--        self.listings = listings
--        self.db = monitor.db
-+    def __init__(self, monitor):
-         self.gmail_address = os.environ.get('GMAIL_ADDRESS', '')
-         self.gmail_app_password = os.environ.get('GMAIL_APP_PASSWORD', '')
-         self.to_email = os.environ.get('ALERT_TO_EMAIL', '')
-+        self.sheet_url = os.environ.get('SHEET_URL', '')
- 
--    def send_alerts(self):
--        if not self.listings:
-+    def send_summary(self, count: int):
-+        """Send one summary email: N new listings + a link to the sheet."""
-+        if count <= 0:
-             return
- 
-         if not all([self.gmail_address, self.gmail_app_password, self.to_email]):
-@@ -142,16 +91,15 @@ class Emailer:
-                 'GMAIL_ADDRESS, GMAIL_APP_PASSWORD, ALERT_TO_EMAIL'
-             )
- 
--        count = len(self.listings)
-         plural = 's' if count != 1 else ''
--        subject = f"🏠 {count} new StreetEasy listing{plural} match your filters"
-+        subject = f"🏠 {count} new StreetEasy listing{plural}"
- 
-         msg = MIMEMultipart('alternative')
-         msg['Subject'] = subject
-         msg['From'] = self.gmail_address
-         msg['To'] = self.to_email
--        msg.attach(MIMEText(_build_plain(self.listings), 'plain'))
--        msg.attach(MIMEText(_build_html(self.listings), 'html'))
-+        msg.attach(MIMEText(_build_plain(count, self.sheet_url), 'plain'))
-+        msg.attach(MIMEText(_build_html(count, self.sheet_url), 'html'))
- 
-         try:
-             with smtplib.SMTP(self.SMTP_HOST, self.SMTP_PORT) as server:
-@@ -159,10 +107,7 @@ class Emailer:
-                 server.starttls()
-                 server.login(self.gmail_address, self.gmail_app_password)
-                 server.sendmail(self.gmail_address, self.to_email, msg.as_string())
--
--            print(f'{get_datetime()} Email sent — {count} listing{plural}')
--            for listing in self.listings:
--                self.db.insert_new_listing(listing)
-+            print(f'{get_datetime()} Summary email sent — {count} listing{plural}')
-         except Exception as e:
-             print(f'{get_datetime()} Failed to send email: {e}')
-             raise
-diff --git a/src/streeteasymonitor/monitor.py b/src/streeteasymonitor/monitor.py
-index 574c300..dfd854c 100644
---- a/src/streeteasymonitor/monitor.py
-+++ b/src/streeteasymonitor/monitor.py
-@@ -4,6 +4,7 @@ from src.streeteasymonitor.search import Search
- from src.streeteasymonitor.database import Database
- from src.streeteasymonitor.emailer import Emailer
- from src.streeteasymonitor.detail_fetcher import DetailFetcher
-+from src.streeteasymonitor.sheets_writer import SheetsWriter
- from src.streeteasymonitor.config import Config
- 
- 
-@@ -24,11 +25,27 @@ class Monitor:
-         self.session.close()
- 
-     def run(self):
-+        # 1. Search — the local DB acts as a pre-filter so we don't re-fetch
-+        #    detail pages for units we've already seen.
-         self.search = Search(self)
-         listings = self.search.fetch()
--
--        if listings:
--            fetcher = DetailFetcher(self.session)
--            enriched = [fetcher.fetch(listing) for listing in listings]
--            emailer = Emailer(self, enriched)
--            emailer.send_alerts()
-+        if not listings:
-+            return
-+
-+        # 2. Enrich each new listing with detail-page data
-+        #    (contact, phone, days on market, date available).
-+        fetcher = DetailFetcher(self.session)
-+        enriched = [fetcher.fetch(listing) for listing in listings]
-+
-+        # 3. Push to the Google Sheet. The Apps Script de-dupes by listing_id
-+        #    and is the authority for what counts as "new", returning the count
-+        #    actually appended.
-+        added = SheetsWriter().push(enriched)
-+
-+        # 4. Keep the local DB in sync so it stays an accurate pre-filter.
-+        for listing in enriched:
-+            self.db.insert_new_listing(listing)
-+
-+        # 5. One summary email — only if rows were actually added to the sheet.
-+        if added > 0:
-+            Emailer(self).send_summary(added)
-diff --git a/src/streeteasymonitor/sheets_writer.py b/src/streeteasymonitor/sheets_writer.py
-new file mode 100644
-index 0000000..dfdd856
---- /dev/null
-+++ b/src/streeteasymonitor/sheets_writer.py
-@@ -0,0 +1,123 @@
-+"""
-+Pushes new listings to a Google Sheet via an Apps Script web-app webhook.
-+
-+The Apps Script endpoint is the single source of truth for de-duplication:
-+it keys on ``listing_id`` and only appends rows it has not seen before,
-+returning how many were actually added. This module is a no-op (returns 0)
-+if the webhook env vars are unset, so the monitor still runs without it.
-+
-+Env vars:
-+  SHEETS_WEBHOOK_URL     — the Apps Script web-app /exec URL
-+  SHEETS_WEBHOOK_SECRET  — shared secret, must match the script's SECRET
-+"""
-+
-+import os
-+
-+import requests
-+
-+from .utils import get_datetime
-+
-+
-+# Columns sent to the sheet, in display order. The Apps Script builds its
-+# header row from these same keys, so order here == column order in the sheet.
-+SHEET_FIELDS = [
-+    'address',
-+    'neighborhood',
-+    'price',
-+    'beds',
-+    'baths',
-+    'date_available',
-+    'days_listed',
-+    'contact_name',
-+    'contact_company',
-+    'contact_phone',
-+    'url',
-+    'listing_id',
-+]
-+
-+
-+class SheetsWriter:
-+    """POSTs new listings to the Apps Script webhook and reports the count added."""
-+
-+    def __init__(self):
-+        self.url = os.environ.get('SHEETS_WEBHOOK_URL', '')
-+        self.secret = os.environ.get('SHEETS_WEBHOOK_SECRET', '')
-+
-+    @property
-+    def enabled(self) -> bool:
-+        return bool(self.url and self.secret)
+     @staticmethod
+-    def _row(listing: dict) -> dict:
++    def _split_name(name: str):
++        """('Jane Q Broker') -> ('Jane', 'Q Broker'). One word -> ('', '')."""
++        name = (name or '').strip()
++        if not name or name == 'N/A':
++            return '', ''
++        parts = name.split()
++        if len(parts) == 1:
++            return parts[0], ''
++        return parts[0], ' '.join(parts[1:])
 +
 +    @staticmethod
-+    def _row(listing: dict) -> dict:
-+        """Normalize a listing into the exact keys the sheet expects."""
-+        url = listing.get('detail_url') or listing.get('url', '')
-+        if url and not url.startswith('http'):
-+            url = f'https://streeteasy.com{url}'
++    def _street_without_unit(listing: dict) -> str:
++        """Street address with the unit number removed."""
++        street = (listing.get('street') or '').strip()
++        if street:
++            return street
++        # Fall back: strip a trailing unit token off the full address.
++        addr = (listing.get('address') or '').strip()
++        unit = (listing.get('unit') or '').strip()
++        if unit and addr.endswith(unit):
++            addr = addr[: -len(unit)].strip()
++        else:
++            # e.g. "325 Kent Ave 5B" / "12 Main St #4F" / "5 E 22 St Apt 3"
++            addr = re.sub(
++                r'\s+(?:#|apt\.?|unit|ph)?\s*[\w\-]*\d[\w\-]*$', '', addr, flags=re.I
++            ).strip()
++        return addr or listing.get('address', 'N/A')
 +
-+        price = listing.get('price', '')
-+        # Keep price numeric where possible so the sheet column sorts correctly.
-+        try:
-+            price = int(float(price))
-+        except (TypeError, ValueError):
-+            pass
-+
-+        return {
-+            'address': listing.get('address', 'N/A'),
-+            'neighborhood': listing.get('neighborhood', 'N/A'),
-+            'price': price,
-+            'beds': listing.get('beds', 'N/A'),
-+            'baths': listing.get('baths', 'N/A'),
-+            'date_available': listing.get('date_available', 'N/A'),
-+            'days_listed': listing.get('days_listed', 'N/A'),
-+            'contact_name': listing.get('contact_name', 'N/A'),
-+            'contact_company': listing.get('contact_company', 'N/A'),
-+            'contact_phone': listing.get('contact_phone', 'N/A'),
-+            'url': url,
-+            'listing_id': listing.get('listing_id', url),
-+        }
-+
-+    def push(self, listings: list[dict]) -> int:
-+        """Send listings to the sheet. Returns the number of NEW rows appended.
-+
-+        Returns 0 (and prints a notice) if the webhook is not configured, or on
-+        any transport/endpoint error — the monitor should not crash because the
-+        sheet is unreachable.
-+        """
-+        if not listings:
-+            return 0
-+
-+        if not self.enabled:
-+            print(
-+                f'{get_datetime()} SHEETS_WEBHOOK_URL/SECRET not set — '
-+                f'skipping Google Sheet sync.'
-+            )
-+            return 0
-+
-+        payload = {
-+            'secret': self.secret,
-+            'fields': SHEET_FIELDS,
-+            'listings': [self._row(l) for l in listings],
-+        }
-+
-+        try:
-+            resp = requests.post(self.url, json=payload, timeout=30)
-+            resp.raise_for_status()
-+            data = resp.json()
-+        except Exception as e:
-+            print(f'{get_datetime()} Google Sheet sync failed: {e}')
-+            return 0
-+
-+        if data.get('ok') is not True:
-+            print(
-+                f'{get_datetime()} Google Sheet rejected the request: '
-+                f'{data.get("error", data)}'
-+            )
-+            return 0
-+
-+        added = int(data.get('added', 0))
-+        total = data.get('total')
-+        print(
-+            f'{get_datetime()} Google Sheet sync: {added} new row(s) appended'
-+            + (f' (sheet now holds {total}).' if total is not None else '.')
++    @classmethod
++    def _build_message(cls, listing: dict, first: str) -> str:
++        """A copy-paste viewing-request message for the listing."""
++        greeting_name = first or 'there'
++        street = cls._street_without_unit(listing)
++        avail = (listing.get('date_available') or '').strip()
++        if avail in ('Now', 'Today'):
++            unit_clause = 'the unit available now'
++        elif avail and avail != 'N/A':
++            unit_clause = f'the unit available starting {avail}'
++        else:
++            unit_clause = 'the unit'
++        return (
++            f"Hi {greeting_name}\n\n"
++            f"I'm very interested in {unit_clause} at {street}. "
++            f"Please let me know when the unit would be available for a viewing.\n\n"
++            f"Thank you!\nDonnya"
 +        )
-+        return added
++
++    @classmethod
++    def _row(cls, listing: dict) -> dict:
+         """Normalize a listing into the exact keys the sheet expects."""
+         url = listing.get('detail_url') or listing.get('url', '')
+         if url and not url.startswith('http'):
+@@ -61,18 +115,25 @@ class SheetsWriter:
+         except (TypeError, ValueError):
+             pass
+ 
++        first, last = cls._split_name(listing.get('contact_name', ''))
++
+         return {
+             'address': listing.get('address', 'N/A'),
+             'neighborhood': listing.get('neighborhood', 'N/A'),
+             'price': price,
+             'beds': listing.get('beds', 'N/A'),
+             'baths': listing.get('baths', 'N/A'),
++            'laundry': listing.get('laundry', 'N/A'),
++            'elevator': listing.get('elevator', 'N/A'),
++            'doorman': listing.get('doorman', 'N/A'),
+             'date_available': listing.get('date_available', 'N/A'),
+             'days_listed': listing.get('days_listed', 'N/A'),
+-            'contact_name': listing.get('contact_name', 'N/A'),
++            'contact_first': first or 'N/A',
++            'contact_last': last or 'N/A',
+             'contact_company': listing.get('contact_company', 'N/A'),
+             'contact_phone': listing.get('contact_phone', 'N/A'),
+             'url': url,
++            'message': cls._build_message(listing, first),
+             'listing_id': listing.get('listing_id', url),
+         }
+ 

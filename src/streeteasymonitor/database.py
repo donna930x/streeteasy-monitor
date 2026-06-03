@@ -30,7 +30,10 @@ class Database:
                     contacts TEXT,
                     contact_name TEXT,
                     contact_company TEXT,
-                    contact_phone TEXT
+                    contact_phone TEXT,
+                    laundry TEXT,
+                    elevator TEXT,
+                    doorman TEXT
                 )
             """)
             # Add columns if upgrading from the original schema (no-op if already exist)
@@ -43,6 +46,9 @@ class Database:
                 ('contact_name', 'TEXT'),
                 ('contact_company', 'TEXT'),
                 ('contact_phone', 'TEXT'),
+                ('laundry', 'TEXT'),
+                ('elevator', 'TEXT'),
+                ('doorman', 'TEXT'),
             ]:
                 try:
                     cursor.execute(f'ALTER TABLE listings ADD COLUMN {col} {col_type}')
@@ -67,7 +73,8 @@ class Database:
         # Only persist columns that exist in the schema
         allowed = {'listing_id', 'url', 'price', 'address', 'neighborhood',
                    'beds', 'baths', 'days_listed', 'date_available', 'contacts',
-                   'contact_name', 'contact_company', 'contact_phone'}
+                   'contact_name', 'contact_company', 'contact_phone',
+                   'laundry', 'elevator', 'doorman'}
         filtered = {k: v for k, v in listing.items() if k in allowed}
         columns = ', '.join(filtered.keys())
         placeholders = ', '.join('?' * len(filtered))

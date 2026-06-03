@@ -24,9 +24,31 @@ Search ──▶ DetailFetcher ──▶ SheetsWriter.push() ──▶ Apps Scri
 
 ## Sheet columns
 
-`Date Added · Address · Neighborhood · Price · Beds · Baths · Available ·
-Days on Market · Contact Name · Contact Company · Contact Phone · Listing
-(clickable "View") · Listing ID`
+`Date Added · Address · Neighborhood · Price · Beds · Baths · Laundry ·
+Elevator · Doorman · Available · Days on Market · Contact First ·
+Contact Last · Contact Company · Contact Phone · Listing (clickable "View") ·
+Message · Listing ID`
+
+- **Laundry** — `In unit` / `In building` / `None`
+- **Elevator** — `Yes` / `No`
+- **Doorman** — `Virtual` / `Yes` / `No`
+- **Contact First / Contact Last** — the contact name split on the first space
+- **Contact Phone** — plain 10 digits (e.g. `7186827712`), so Sheets doesn't
+  read a leading `+` as a formula
+- **Days on Market** — `0` for units available today/now
+- **Message** — a ready-to-send viewing request you can copy straight out of the
+  cell, e.g.:
+
+  > Hi Jane
+  >
+  > I'm very interested in the unit available starting 7/1/2026 at 325 Kent Ave.
+  > Please let me know when the unit would be available for a viewing.
+  >
+  > Thank you!
+  > Donnya
+
+  It uses the available date (or "available now" for immediate units) and the
+  street address with the unit number stripped off.
 
 The header row is written automatically on the first run. `Listing ID` is the
 dedup key — leave it in place (you can hide the column if you don't want to see it).
