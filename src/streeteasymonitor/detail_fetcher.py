@@ -62,7 +62,9 @@ class DetailFetcher:
         }
 
         try:
-            r = self.session.get(url, timeout=15)
+            # Proxied/rendered requests are slower, so allow more time.
+            timeout = 70 if getattr(self.session, 'proxies', None) else 15
+            r = self.session.get(url, timeout=timeout)
             if r.status_code != 200:
                 return enriched
             enriched.update(self._parse(r.content))

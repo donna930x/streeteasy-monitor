@@ -16,6 +16,22 @@ class Monitor:
         self.session = requests.Session()
         self.session.headers.update(self.config.get_headers())
 
+        # Optional: route everything through a residential proxy / scraping API
+        # to get past StreetEasy's datacenter-IP block (set SCRAPER_PROXY_URL).
+        proxies = self.config.get_proxies()
+        if proxies:
+            self.session.proxies.update(proxies)
+            # These services terminate TLS themselves, so cert verification
+            # against streeteasy.com would fail — disable it for the proxied
+            # session and silence the resulting warning.
+            self.session.verify = False
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+            print('Routing requests through SCRAPER_PROXY_URL.')
+
         self.kwargs = kwargs
 
     def __enter__(self):

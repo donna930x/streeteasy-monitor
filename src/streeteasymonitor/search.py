@@ -133,13 +133,18 @@ class Search:
         """GET ``url`` with a warm-up and exponential backoff, rotating the
         browser identity on each retry. Retries only on block-like statuses
         (403 / 429 / 503); returns immediately on anything else."""
+        proxied = bool(self.session.proxies)
+        # A scraping proxy renders JS + rotates IPs itself, so the homepage
+        # warm-up is pointless (and burns a credit); allow longer for rendering.
+        timeout = 70 if proxied else 20
         response = None
         for i in range(attempts):
             # Fresh identity per attempt (keeps UA + client hints consistent).
             self.session.headers.update(Config().get_headers())
-            self._warm_up()
+            if not proxied:
+                self._warm_up()
 
-            response = self.session.get(url, timeout=20)
+            response = self.session.get(url, timeout=timeout)
             if response.status_code == 200:
                 if i:
                     print(f'{get_datetime()} Search succeeded on attempt {i + 1}.')

@@ -1,3 +1,4 @@
+import os
 import random
 
 from environs import Env
@@ -115,6 +116,24 @@ class Config:
     def __init__(self):
         self.env = Env()
         self.env.read_env()
+
+    def get_proxies(self) -> dict | None:
+        """Route all requests through a residential-proxy / scraping API.
+
+        Set ``SCRAPER_PROXY_URL`` to the full proxy string your provider gives
+        you (it bakes the API key — and any 'render JS' flag — into the
+        username/password), e.g.::
+
+            ScraperAPI : http://scraperapi:KEY@proxy-server.scraperapi.com:8001
+            ScrapingBee: http://KEY:render_js=True@proxy.scrapingbee.com:8887
+            ZenRows    : http://KEY:js_render=true@superproxy.zenrows.com:1337
+
+        Returns None (direct connection) if the var is unset.
+        """
+        url = os.environ.get('SCRAPER_PROXY_URL', '').strip()
+        if not url:
+            return None
+        return {'http': url, 'https': url}
 
     def get_headers(self, identity: dict | None = None) -> dict:
         """Browser-like headers for a top-level navigation GET.
