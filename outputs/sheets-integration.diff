@@ -1,317 +1,62 @@
+diff --git a/.github/workflows/monitor.yml b/.github/workflows/monitor.yml
+index 3616163..1b242f7 100644
+--- a/.github/workflows/monitor.yml
++++ b/.github/workflows/monitor.yml
+@@ -22,9 +22,9 @@ jobs:
+         uses: actions/cache@v4
+         with:
+           path: data/db.sqlite3
+-          key: streeteasy-db-v1
++          key: streeteasy-db-v2
+           restore-keys: |
+-            streeteasy-db-
++            streeteasy-db-v2-
+ 
+       - name: Set up Python
+         uses: actions/setup-python@v5
+@@ -51,4 +51,4 @@ jobs:
+         uses: actions/cache/save@v4
+         with:
+           path: data/db.sqlite3
+-          key: streeteasy-db-v1-${{ github.run_id }}
++          key: streeteasy-db-v2-${{ github.run_id }}
 diff --git a/apps_script.gs b/apps_script.gs
-index 82703e3..b09633b 100644
+index b09633b..7340258 100644
 --- a/apps_script.gs
 +++ b/apps_script.gs
-@@ -30,12 +30,17 @@ var LABELS = {
-   price: 'Price',
-   beds: 'Beds',
-   baths: 'Baths',
-+  laundry: 'Laundry',
-+  elevator: 'Elevator',
-+  doorman: 'Doorman',
-   date_available: 'Available',
-   days_listed: 'Days on Market',
--  contact_name: 'Contact Name',
-+  contact_first: 'Contact First',
-+  contact_last: 'Contact Last',
-   contact_company: 'Contact Company',
-   contact_phone: 'Contact Phone',
-   url: 'Listing',          // rendered as a clickable HYPERLINK
-+  message: 'Message',      // copy-paste viewing request
-   listing_id: 'Listing ID' // dedup key, kept last
- };
+@@ -62,13 +62,28 @@ function doPost(e) {
  
-diff --git a/src/streeteasymonitor/database.py b/src/streeteasymonitor/database.py
-index fdae793..3f949ef 100644
---- a/src/streeteasymonitor/database.py
-+++ b/src/streeteasymonitor/database.py
-@@ -30,7 +30,10 @@ class Database:
-                     contacts TEXT,
-                     contact_name TEXT,
-                     contact_company TEXT,
--                    contact_phone TEXT
-+                    contact_phone TEXT,
-+                    laundry TEXT,
-+                    elevator TEXT,
-+                    doorman TEXT
-                 )
-             """)
-             # Add columns if upgrading from the original schema (no-op if already exist)
-@@ -43,6 +46,9 @@ class Database:
-                 ('contact_name', 'TEXT'),
-                 ('contact_company', 'TEXT'),
-                 ('contact_phone', 'TEXT'),
-+                ('laundry', 'TEXT'),
-+                ('elevator', 'TEXT'),
-+                ('doorman', 'TEXT'),
-             ]:
-                 try:
-                     cursor.execute(f'ALTER TABLE listings ADD COLUMN {col} {col_type}')
-@@ -67,7 +73,8 @@ class Database:
-         # Only persist columns that exist in the schema
-         allowed = {'listing_id', 'url', 'price', 'address', 'neighborhood',
-                    'beds', 'baths', 'days_listed', 'date_available', 'contacts',
--                   'contact_name', 'contact_company', 'contact_phone'}
-+                   'contact_name', 'contact_company', 'contact_phone',
-+                   'laundry', 'elevator', 'doorman'}
-         filtered = {k: v for k, v in listing.items() if k in allowed}
-         columns = ', '.join(filtered.keys())
-         placeholders = ', '.join('?' * len(filtered))
-diff --git a/src/streeteasymonitor/detail_fetcher.py b/src/streeteasymonitor/detail_fetcher.py
-index 8509b0b..65feef2 100644
---- a/src/streeteasymonitor/detail_fetcher.py
-+++ b/src/streeteasymonitor/detail_fetcher.py
-@@ -55,6 +55,9 @@ class DetailFetcher:
-             'contact_name': 'N/A',
-             'contact_company': 'N/A',
-             'contact_phone': 'N/A',
-+            'laundry': 'N/A',
-+            'elevator': 'N/A',
-+            'doorman': 'N/A',
-             'detail_url': url,
-         }
+     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
  
-@@ -91,14 +94,30 @@ class DetailFetcher:
-         avail = self._available_from_text(text) or self._iso_to_us(flight.get('availableAt'))
-         if avail:
-             result['date_available'] = avail
-+        available_now = avail == 'Now' or bool(
-+            re.search(r'available\s+(?:today|now|immediately)', text, re.I)
-+        )
- 
-         # --- days on market --------------------------------------------
-         days = self._days_from_text(text)
-         if days is None:
-             days = self._days_from_flight(flight)
-+        # Reject implausible values (e.g. a stray year like 2026 captured by a
-+        # loose match) — real days-on-market is small and never negative.
-+        if days is not None and not (0 <= days <= 3650):
-+            days = None
-+        # A unit available today/now hasn't been on market — call it 0.
-+        if days is None and available_now:
-+            days = 0
-         if days is not None:
-             result['days_listed'] = str(days)
- 
-+        # --- amenities (laundry / elevator / doorman) ------------------
-+        laundry, elevator, doorman = self._extract_amenities(text)
-+        result['laundry'] = laundry
-+        result['elevator'] = elevator
-+        result['doorman'] = doorman
+-    // --- header row (write once) ---
+-    if (sheet.getLastRow() === 0) {
+-      var header = ['Date Added'].concat(
+-        fields.map(function (f) { return LABELS[f] || f; })
+-      );
+-      sheet.appendRow(header);
+-      sheet.getRange(1, 1, 1, header.length).setFontWeight('bold');
++    // --- header: self-healing -------------------------------------------
++    // Expected header is derived from the fields the client sends. If the
++    // sheet is empty OR its current header doesn't match (columns were added
++    // / reordered), wipe it and rewrite. This prevents stale-header column
++    // misalignment (e.g. a date bleeding into the Price column) without the
++    // user ever having to clear the sheet by hand.
++    var expected = ['Date Added'].concat(
++      fields.map(function (f) { return LABELS[f] || f; })
++    );
 +
-         # --- contact (name / company / phone in separate fields) -------
-         name, company, phone = self._extract_contact(text, raw, flight_text, flight)
-         result['contact_name'] = name or 'N/A'
-@@ -200,12 +219,17 @@ class DetailFetcher:
- 
-     @staticmethod
-     def _format_phone(s) -> str:
-+        """Return a plain 10-digit string, e.g. '7186827712'.
-+
-+        No '+', spaces, or parens — a leading '+' makes Google Sheets treat the
-+        cell as a formula and error out.
-+        """
-         d = re.sub(r'\D', '', str(s))
-         if len(d) == 11 and d[0] == '1':
-             d = d[1:]
-         if len(d) == 10:
--            return f'+1 ({d[0:3]}) {d[3:6]}-{d[6:10]}'
--        return str(s).strip()
-+            return d
-+        return d or str(s).strip()
- 
-     # ------------------------------------------------------------------ #
-     # Flight payload helpers
-@@ -293,6 +317,46 @@ class DetailFetcher:
-                 return (date.today() - d).days
-         return None
- 
-+    # ------------------------------------------------------------------ #
-+    # Amenities
-+    # ------------------------------------------------------------------ #
-+    def _extract_amenities(self, text):
-+        """Return (laundry, elevator, doorman) from the rendered amenity lists.
-+
-+        StreetEasy only renders amenities a listing *has*, so presence-matching
-+        on the visible text is reliable.
-+          - laundry:  'In unit' | 'In building' | 'None'
-+          - elevator: 'Yes' | 'No'
-+          - doorman:  'Virtual' | 'Yes' | 'No'
-+        """
-+        hay = text.lower()
-+
-+        in_unit = bool(
-+            re.search(r'(?:washer\s*/?\s*dryer|laundry)[^.\n]{0,15}in[\s-]*unit', hay)
-+            or re.search(r'in[\s-]*unit[^.\n]{0,15}(?:washer|dryer|laundry)', hay)
-+        )
-+        in_building = bool(
-+            re.search(r'laundry[^.\n]{0,15}in[\s-]*building', hay)
-+            or 'laundry in building' in hay
-+        )
-+        if in_unit:
-+            laundry = 'In unit'
-+        elif in_building:
-+            laundry = 'In building'
-+        else:
-+            laundry = 'None'
-+
-+        elevator = 'Yes' if re.search(r'\belevator\b', hay) else 'No'
-+
-+        if re.search(r'virtual\s+doorman', hay):
-+            doorman = 'Virtual'
-+        elif re.search(r'\bdoorman\b', hay):
-+            doorman = 'Yes'
-+        else:
-+            doorman = 'No'
-+
-+        return laundry, elevator, doorman
-+
-     # ------------------------------------------------------------------ #
-     # Rendered-text helpers
-     # ------------------------------------------------------------------ #
-@@ -305,7 +369,7 @@ class DetailFetcher:
-                       r'([A-Z][a-z]+\.?\s+\d{1,2}(?:,\s*\d{4})?)', text, re.I | re.S)
-         if m:
-             return m.group(1).strip()
--        if re.search(r'available\s+(?:now|immediately)', text, re.I):
-+        if re.search(r'available\s+(?:now|immediately|today)', text, re.I):
-             return 'Now'
-         return ''
- 
-diff --git a/src/streeteasymonitor/search.py b/src/streeteasymonitor/search.py
-index e40cf79..f1f2b97 100644
---- a/src/streeteasymonitor/search.py
-+++ b/src/streeteasymonitor/search.py
-@@ -197,6 +197,8 @@ class Parser:
-                     'url': url,
-                     'price': str(data.get('price')),
-                     'address': address,
-+                    'street': street or address,             # without the unit #
-+                    'unit': unit,
-                     'neighborhood': data.get('areaName') or 'N/A',
-                     'beds': beds,
-                     'baths': baths,
-@@ -320,6 +322,8 @@ class Parser:
-                     'url': url,
-                     'price': price,
-                     'address': address,
-+                    'street': address,   # unit not separable from rendered DOM
-+                    'unit': '',
-                     'neighborhood': neighborhood,
-                     'beds': beds,
-                     'baths': baths,
-diff --git a/src/streeteasymonitor/sheets_writer.py b/src/streeteasymonitor/sheets_writer.py
-index dfdd856..33ac58e 100644
---- a/src/streeteasymonitor/sheets_writer.py
-+++ b/src/streeteasymonitor/sheets_writer.py
-@@ -12,6 +12,7 @@ Env vars:
- """
- 
- import os
-+import re
- 
- import requests
- 
-@@ -26,12 +27,17 @@ SHEET_FIELDS = [
-     'price',
-     'beds',
-     'baths',
-+    'laundry',
-+    'elevator',
-+    'doorman',
-     'date_available',
-     'days_listed',
--    'contact_name',
-+    'contact_first',
-+    'contact_last',
-     'contact_company',
-     'contact_phone',
-     'url',
-+    'message',
-     'listing_id',
- ]
- 
-@@ -48,7 +54,55 @@ class SheetsWriter:
-         return bool(self.url and self.secret)
- 
-     @staticmethod
--    def _row(listing: dict) -> dict:
-+    def _split_name(name: str):
-+        """('Jane Q Broker') -> ('Jane', 'Q Broker'). One word -> ('', '')."""
-+        name = (name or '').strip()
-+        if not name or name == 'N/A':
-+            return '', ''
-+        parts = name.split()
-+        if len(parts) == 1:
-+            return parts[0], ''
-+        return parts[0], ' '.join(parts[1:])
-+
-+    @staticmethod
-+    def _street_without_unit(listing: dict) -> str:
-+        """Street address with the unit number removed."""
-+        street = (listing.get('street') or '').strip()
-+        if street:
-+            return street
-+        # Fall back: strip a trailing unit token off the full address.
-+        addr = (listing.get('address') or '').strip()
-+        unit = (listing.get('unit') or '').strip()
-+        if unit and addr.endswith(unit):
-+            addr = addr[: -len(unit)].strip()
-+        else:
-+            # e.g. "325 Kent Ave 5B" / "12 Main St #4F" / "5 E 22 St Apt 3"
-+            addr = re.sub(
-+                r'\s+(?:#|apt\.?|unit|ph)?\s*[\w\-]*\d[\w\-]*$', '', addr, flags=re.I
-+            ).strip()
-+        return addr or listing.get('address', 'N/A')
-+
-+    @classmethod
-+    def _build_message(cls, listing: dict, first: str) -> str:
-+        """A copy-paste viewing-request message for the listing."""
-+        greeting_name = first or 'there'
-+        street = cls._street_without_unit(listing)
-+        avail = (listing.get('date_available') or '').strip()
-+        if avail in ('Now', 'Today'):
-+            unit_clause = 'the unit available now'
-+        elif avail and avail != 'N/A':
-+            unit_clause = f'the unit available starting {avail}'
-+        else:
-+            unit_clause = 'the unit'
-+        return (
-+            f"Hi {greeting_name}\n\n"
-+            f"I'm very interested in {unit_clause} at {street}. "
-+            f"Please let me know when the unit would be available for a viewing.\n\n"
-+            f"Thank you!\nDonnya"
-+        )
-+
-+    @classmethod
-+    def _row(cls, listing: dict) -> dict:
-         """Normalize a listing into the exact keys the sheet expects."""
-         url = listing.get('detail_url') or listing.get('url', '')
-         if url and not url.startswith('http'):
-@@ -61,18 +115,25 @@ class SheetsWriter:
-         except (TypeError, ValueError):
-             pass
- 
-+        first, last = cls._split_name(listing.get('contact_name', ''))
-+
-         return {
-             'address': listing.get('address', 'N/A'),
-             'neighborhood': listing.get('neighborhood', 'N/A'),
-             'price': price,
-             'beds': listing.get('beds', 'N/A'),
-             'baths': listing.get('baths', 'N/A'),
-+            'laundry': listing.get('laundry', 'N/A'),
-+            'elevator': listing.get('elevator', 'N/A'),
-+            'doorman': listing.get('doorman', 'N/A'),
-             'date_available': listing.get('date_available', 'N/A'),
-             'days_listed': listing.get('days_listed', 'N/A'),
--            'contact_name': listing.get('contact_name', 'N/A'),
-+            'contact_first': first or 'N/A',
-+            'contact_last': last or 'N/A',
-             'contact_company': listing.get('contact_company', 'N/A'),
-             'contact_phone': listing.get('contact_phone', 'N/A'),
-             'url': url,
-+            'message': cls._build_message(listing, first),
-             'listing_id': listing.get('listing_id', url),
-         }
++    var needsReset = true;
++    if (sheet.getLastRow() >= 1) {
++      var cur = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
++      needsReset = (cur.length !== expected.length);
++      for (var h = 0; !needsReset && h < expected.length; h++) {
++        if (String(cur[h]) !== String(expected[h])) needsReset = true;
++      }
++    }
++    if (needsReset) {
++      sheet.clear();                       // clears contents AND formats
++      sheet.appendRow(expected);
++      sheet.getRange(1, 1, 1, expected.length).setFontWeight('bold');
+       sheet.setFrozenRows(1);
+     }
  

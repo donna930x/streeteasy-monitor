@@ -1,5 +1,7 @@
 import json
+import random
 import re
+import time
 
 from bs4 import BeautifulSoup
 
@@ -57,7 +59,7 @@ class Search:
         print(f'Running with parameters:\n{json.dumps(self.parameters, indent=2)}\n')
         print(f'URL: {self.url}')
 
-        self.r = self.session.get(self.url)
+        self.r = self._get_with_retry(self.url)
         status = self.r.status_code
 
         # --- 1. Transport-level failure (block, redirect, rate-limit) ---
@@ -109,6 +111,50 @@ class Search:
         # --- 4. Success ---
         print(f'{get_datetime()} {len(self.listings)} new listing(s) found.\n')
         return self.listings
+
+    # ------------------------------------------------------------------ #
+    # Anti-bot mitigation: warm-up + retry with backoff
+    # ------------------------------------------------------------------ #
+    def _warm_up(self) -> None:
+        """Hit the homepage first so the session picks up baseline cookies and
+        the search looks like in-site navigation rather than a cold deep-link.
+
+        Note: StreetEasy's bot wall (PerimeterX) sets its real token via
+        JavaScript, which a plain HTTP client can't run — so this helps with
+        the easy checks but won't defeat a hard datacenter-IP block.
+        """
+        try:
+            self.session.get('https://streeteasy.com/', timeout=15)
+            time.sleep(random.uniform(0.8, 2.0))
+        except Exception:
+            pass
+
+    def _get_with_retry(self, url, attempts: int = 4):
+        """GET ``url`` with a warm-up and exponential backoff, rotating the
+        browser identity on each retry. Retries only on block-like statuses
+        (403 / 429 / 503); returns immediately on anything else."""
+        response = None
+        for i in range(attempts):
+            # Fresh identity per attempt (keeps UA + client hints consistent).
+            self.session.headers.update(Config().get_headers())
+            self._warm_up()
+
+            response = self.session.get(url, timeout=20)
+            if response.status_code == 200:
+                if i:
+                    print(f'{get_datetime()} Search succeeded on attempt {i + 1}.')
+                return response
+            if response.status_code not in (403, 429, 503):
+                return response  # a different error — don't hammer the server
+
+            if i < attempts - 1:
+                wait = 2 ** i + random.uniform(0, 1.5)
+                print(
+                    f'{get_datetime()} HTTP {response.status_code} on attempt '
+                    f'{i + 1}/{attempts} — retrying in {wait:.1f}s.'
+                )
+                time.sleep(wait)
+        return response
 
 
 class Parser:
