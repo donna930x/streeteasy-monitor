@@ -37,6 +37,7 @@ def _listing_card(listing: dict) -> str:
     days = listing.get('days_listed', 'N/A')
     days_label = f"{days} day{'s' if days not in ('0', '1', 'N/A') else ''} on market"
     date_avail = listing.get('date_available', 'N/A')
+    contacts = listing.get('contacts', 'N/A')
     url = listing.get('detail_url') or listing.get('url', '')
     address = listing.get('address', 'Unknown address')
 
@@ -49,6 +50,7 @@ def _listing_card(listing: dict) -> str:
         ('Neighborhood', neighborhood),
         ('Days Listed', days_label),
         ('Date Available', date_avail),
+        ('Contact', contacts),
     ]
 
     row_html = ''.join(
@@ -113,6 +115,7 @@ def _build_plain(listings: list[dict]) -> str:
             f"{price} | {l.get('beds', 'N/A')} bed / {l.get('baths', 'N/A')} bath | "
             f"Available: {l.get('date_available', 'N/A')} | "
             f"Days listed: {l.get('days_listed', 'N/A')}\n"
+            f"Contact: {l.get('contacts', 'N/A')}\n"
             f"{url}\n"
         )
     return '\n'.join(lines)

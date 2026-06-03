@@ -95,9 +95,14 @@ class Config:
         )
         return {
             'user-agent': user_agent,
+            # Ask for HTML, not JSON. The previous 'content-type: application/json'
+            # header was wrong for a no-body GET and is a common bot tell; 'origin'
+            # belongs on cross-origin POSTs, not a top-level navigation GET.
+            'accept': (
+                'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                'image/avif,image/webp,*/*;q=0.8'
+            ),
             'accept-language': 'en-US,en;q=0.9',
             'referer': 'https://streeteasy.com/',
             'cache-control': 'no-cache',
-            'content-type': 'application/json',
-            'origin': 'https://streeteasy.com',
         }
