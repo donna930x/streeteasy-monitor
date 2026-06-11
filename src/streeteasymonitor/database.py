@@ -26,6 +26,7 @@ class Database:
                     beds TEXT,
                     baths TEXT,
                     days_listed TEXT,
+                    listed_date TEXT,
                     date_available TEXT,
                     contacts TEXT,
                     contact_name TEXT,
@@ -41,6 +42,7 @@ class Database:
                 ('beds', 'TEXT'),
                 ('baths', 'TEXT'),
                 ('days_listed', 'TEXT'),
+                ('listed_date', 'TEXT'),
                 ('date_available', 'TEXT'),
                 ('contacts', 'TEXT'),
                 ('contact_name', 'TEXT'),
@@ -72,7 +74,7 @@ class Database:
     def insert_new_listing(self, listing: dict):
         # Only persist columns that exist in the schema
         allowed = {'listing_id', 'url', 'price', 'address', 'neighborhood',
-                   'beds', 'baths', 'days_listed', 'date_available', 'contacts',
+                   'beds', 'baths', 'days_listed', 'listed_date', 'date_available', 'contacts',
                    'contact_name', 'contact_company', 'contact_phone',
                    'laundry', 'elevator', 'doorman'}
         filtered = {k: v for k, v in listing.items() if k in allowed}

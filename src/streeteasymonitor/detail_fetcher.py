@@ -18,9 +18,14 @@ Every field falls back to 'N/A' so a scraping failure never blocks the email.
 
 import re
 import json
-from datetime import date, datetime
+import random
+import time
+from datetime import date, datetime, timedelta
 
 from bs4 import BeautifulSoup
+
+from .config import Config
+from .utils import get_datetime
 
 
 class DetailFetcher:
@@ -50,6 +55,7 @@ class DetailFetcher:
             'beds': listing.get('beds', 'N/A'),
             'baths': listing.get('baths', 'N/A'),
             'days_listed': 'N/A',
+            'listed_date': 'N/A',
             'date_available': 'N/A',
             'contacts': 'N/A',
             'contact_name': 'N/A',
@@ -58,20 +64,52 @@ class DetailFetcher:
             'laundry': 'N/A',
             'elevator': 'N/A',
             'doorman': 'N/A',
+            # True for new-dev / lease-up units that show "Leasing Starts"
+            # instead of "Days on market" — the caller omits these.
+            'leasing': False,
             'detail_url': url,
+            # False until the detail page is actually fetched + parsed, so the
+            # caller can retry failures next run instead of recording N/A rows.
+            'detail_ok': False,
         }
 
         try:
-            # Proxied/rendered requests are slower, so allow more time.
-            timeout = 70 if getattr(self.session, 'proxies', None) else 15
-            r = self.session.get(url, timeout=timeout)
-            if r.status_code != 200:
+            r = self._get_with_retry(url)
+            if r is None or r.status_code != 200:
+                print(
+                    f'{get_datetime()} Detail fetch failed for {url} '
+                    f'(status {getattr(r, "status_code", "no response")}).'
+                )
                 return enriched
             enriched.update(self._parse(r.content))
-        except Exception:
-            pass
+            enriched['detail_ok'] = True
+        except Exception as e:
+            print(f'{get_datetime()} Detail fetch error for {url}: {e}')
 
         return enriched
+
+    def _get_with_retry(self, url, attempts: int = 3):
+        """GET a listing detail page with backoff + identity rotation. Retries
+        only on block-like statuses (403 / 429 / 503)."""
+        proxied = bool(getattr(self.session, 'proxies', None))
+        timeout = 70 if proxied else 20
+        response = None
+        for i in range(attempts):
+            try:
+                self.session.headers.update(Config().get_headers())
+            except Exception:
+                pass
+            try:
+                response = self.session.get(url, timeout=timeout)
+            except Exception:
+                response = None
+            if response is not None and response.status_code == 200:
+                return response
+            if response is not None and response.status_code not in (403, 429, 503):
+                return response  # genuine other error (e.g. 404) — don't hammer
+            if i < attempts - 1:
+                time.sleep(2 ** i + random.uniform(0, 1.5))
+        return response
 
     # ------------------------------------------------------------------ #
     def _parse(self, content: bytes) -> dict:
@@ -104,15 +142,26 @@ class DetailFetcher:
         days = self._days_from_text(text)
         if days is None:
             days = self._days_from_flight(flight)
-        # Reject implausible values (e.g. a stray year like 2026 captured by a
-        # loose match) — real days-on-market is small and never negative.
-        if days is not None and not (0 <= days <= 3650):
+        # Reject implausible values (e.g. a stray year like 2026, or an
+        # original-listing date-diff) — a rental's days-on-market is never
+        # negative and realistically well under ~2 years.
+        if days is not None and not (0 <= days <= 1000):
             days = None
         # A unit available today/now hasn't been on market — call it 0.
         if days is None and available_now:
             days = 0
         if days is not None:
             result['days_listed'] = str(days)
+            # Store the listing DATE so the sheet can recompute days-on-market
+            # itself (=TODAY()-date) and never go stale.
+            result['listed_date'] = (
+                date.today() - timedelta(days=days)
+            ).strftime('%Y-%m-%d')
+
+        # --- new-dev / lease-up flag -----------------------------------
+        # These units show "Leasing Starts" instead of "Days on market"; the
+        # caller omits them entirely.
+        result['leasing'] = bool(re.search(r'leasing\s+starts', text, re.I))
 
         # --- amenities (laundry / elevator / doorman) ------------------
         laundry, elevator, doorman = self._extract_amenities(text)
@@ -310,13 +359,20 @@ class DetailFetcher:
         return None
 
     def _days_from_flight(self, flight):
+        # Explicit, trustworthy day-count fields first.
         for key in ('daysOnMarket', 'daysOnStreetEasy', 'daysListed'):
-            if isinstance(flight.get(key), int):
-                return flight[key]
-        for key in ('listedAt', 'firstListedAt', 'createdAt'):
-            d = self._parse_iso(flight.get(key))
-            if d:
-                return (date.today() - d).days
+            v = flight.get(key)
+            if isinstance(v, int) and 0 <= v <= 3650:
+                return v
+        # Date-diff only from the *current* listing date (resets on relist).
+        # We deliberately ignore createdAt / firstListedAt: those point at the
+        # original listing years ago, so a unit that is actually "Today" would
+        # otherwise read ~2000 days. Bound the result to a plausible window.
+        d = self._parse_iso(flight.get('listedAt'))
+        if d:
+            diff = (date.today() - d).days
+            if 0 <= diff <= 730:
+                return diff
         return None
 
     # ------------------------------------------------------------------ #
@@ -376,13 +432,25 @@ class DetailFetcher:
         return ''
 
     def _days_from_text(self, text):
+        # "Days on market: Today" / "less than a day" / "0 days" → 0.
+        # Checked first so it wins over any stale date in the Flight payload.
+        if re.search(
+            r'days?\s+on\s+market[^0-9A-Za-z]{0,20}'
+            r'(?:today|less\s+than\s+a\s+day|<\s*1\s*day|0\s*days?\b)',
+            text, re.I,
+        ):
+            return 0
         m = re.search(r'days?\s+on\s+market[^0-9]{0,20}(\d+)\s*days?', text, re.I | re.S)
         if m:
             return int(m.group(1))
         m = re.search(r'(\d+)\s+days?\s+on\s+(?:street\s*easy|market)', text, re.I)
         if m:
             return int(m.group(1))
-        if re.search(r'listed\s+today', text, re.I):
+        # "Listed today" / "listed less than a day ago" / "listed N hours ago" → 0
+        if re.search(
+            r'listed\s+(?:today|less\s+than\s+a\s+day|\d+\s+(?:hours?|minutes?)\s+ago)',
+            text, re.I,
+        ):
             return 0
         return None
 

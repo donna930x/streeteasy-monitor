@@ -1,11 +1,13 @@
 name: StreetEasy Monitor
 
 on:
-  schedule:
-    # Runs every 20 minutes, 8am–11pm ET (12:00–03:00 UTC next day)
-    # Adjust or simplify to "*/20 * * * *" to run 24/7
-    - cron: '*/20 12-23,0-3 * * *'
-  workflow_dispatch:  # allows manual trigger from the Actions tab
+  # The scheduled cloud run is DISABLED: GitHub's datacenter IPs are hard-blocked
+  # by StreetEasy (HTTP 403). The monitor now runs locally via a launchd
+  # LaunchAgent (see cron/install_launchd.sh). Re-enable this schedule only if
+  # you add a working SCRAPER_PROXY_URL.
+  # schedule:
+  #   - cron: '*/20 12-23,0-3 * * *'
+  workflow_dispatch:  # still allows manual trigger from the Actions tab
 
 jobs:
   monitor:

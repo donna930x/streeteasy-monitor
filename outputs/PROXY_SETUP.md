@@ -27,11 +27,12 @@ If `SCRAPER_PROXY_URL` is unset, nothing changes — it connects directly.
 Any of these work; all have a free tier to start. Sign up, grab your API key,
 and use the matching proxy string (replace `KEY` with your key):
 
-| Provider | `SCRAPER_PROXY_URL` value |
-|---|---|
-| **ScraperAPI** | `http://scraperapi:KEY@proxy-server.scraperapi.com:8001` |
-| **ScrapingBee** | `http://KEY:render_js=True@proxy.scrapingbee.com:8887` |
-| **ZenRows** | `http://KEY:js_render=true@superproxy.zenrows.com:1337` |
+| Provider | `SCRAPER_PROXY_URL` value | Notes |
+|---|---|---|
+| **ScraperAPI** | `http://scraperapi:KEY@proxy-server.scraperapi.com:8001` | Free tier ~1k req/mo |
+| **ScrapingBee** | `http://KEY:render_js=True@proxy.scrapingbee.com:8887` | Free tier |
+| **ZenRows** | `http://KEY:js_render=true@superproxy.zenrows.com:1337` | Free tier |
+| **Bright Data (Web Unlocker)** | `http://brd-customer-CUSTOMER_ID-zone-UNLOCKER_ZONE:PASSWORD@brd.superproxy.io:33335` | Strongest vs PerimeterX; pay-as-you-go (trial credit, no perpetual free tier). Create a **Web Unlocker** zone; rendering/CAPTCHA is automatic. Port `33335` (old `22225` is being retired). |
 
 Tips:
 - **Start without JS rendering** if the provider lets you (cheaper, faster) — a

@@ -34,7 +34,8 @@ var LABELS = {
   elevator: 'Elevator',
   doorman: 'Doorman',
   date_available: 'Available',
-  days_listed: 'Days on Market',
+  listed_date: 'Listed Date',
+  days_on_market: 'Days on Market',  // formula: =TODAY()-listed_date
   contact_first: 'Contact First',
   contact_last: 'Contact Last',
   contact_company: 'Contact Company',
@@ -104,6 +105,11 @@ function doPost(e) {
       new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'
     );
 
+    // Column letter of the Listed Date cell, so the Days on Market formula can
+    // reference it per row (+2: skip the leading Date Added col, 1-based sheet).
+    var listedIdx = fields.indexOf('listed_date');
+    var listedColLetter = listedIdx === -1 ? null : _columnToLetter(listedIdx + 2);
+
     var added = 0;
     for (var j = 0; j < listings.length; j++) {
       var item = listings[j];
@@ -111,6 +117,7 @@ function doPost(e) {
       if (!id || seen[id]) continue;
       seen[id] = true;
 
+      var rowIdx = sheet.getLastRow() + 1;   // the row this append will write to
       var row = [today];
       for (var k = 0; k < fields.length; k++) {
         var key = fields[k];
@@ -118,11 +125,34 @@ function doPost(e) {
         if (key === 'url' && val) {
           // Clickable link; label it "View" so the cell isn't a giant URL.
           val = '=HYPERLINK("' + String(val).replace(/"/g, '""') + '","View")';
+        } else if (key === 'listed_date') {
+          // Store a real Date so the days formula can do arithmetic on it.
+          val = _toDate(val);
+        } else if (key === 'days_on_market') {
+          // Self-updating: recomputed every time the sheet is opened.
+          val = listedColLetter
+            ? '=IF(' + listedColLetter + rowIdx + '="","",TODAY()-' +
+              listedColLetter + rowIdx + ')'
+            : '';
         }
         row.push(val === undefined || val === null ? '' : val);
       }
       sheet.appendRow(row);
       added++;
+    }
+
+    // Keep the date + days columns formatted sensibly (date / whole number).
+    var lastR = sheet.getLastRow();
+    if (lastR > 1) {
+      if (listedColLetter) {
+        sheet.getRange(listedColLetter + '2:' + listedColLetter + lastR)
+             .setNumberFormat('yyyy-mm-dd');
+      }
+      var domIdx = fields.indexOf('days_on_market');
+      if (domIdx !== -1) {
+        var domCol = _columnToLetter(domIdx + 2);
+        sheet.getRange(domCol + '2:' + domCol + lastR).setNumberFormat('0');
+      }
     }
 
     return _json({ ok: true, added: added, total: sheet.getLastRow() - 1 });
@@ -137,4 +167,24 @@ function _json(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// "2026-05-22" -> a local Date (midnight). '' for anything that isn't a date,
+// so an unknown listing date leaves both cells blank.
+function _toDate(v) {
+  if (!v) return '';
+  var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+// 1 -> "A", 27 -> "AA", etc.
+function _columnToLetter(col) {
+  var s = '';
+  while (col > 0) {
+    var r = (col - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    col = Math.floor((col - 1) / 26);
+  }
+  return s;
 }

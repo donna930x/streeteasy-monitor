@@ -60,6 +60,15 @@ class Search:
         print(f'URL: {self.url}')
 
         self.r = self._get_with_retry(self.url)
+
+        # --- 0. No response at all (timeouts / connection errors) ---
+        if self.r is None:
+            print(
+                f'{get_datetime()} No response from StreetEasy after retries '
+                f'(timeout / connection error). Will try again next run.\n'
+            )
+            return self.listings
+
         status = self.r.status_code
 
         # --- 1. Transport-level failure (block, redirect, rate-limit) ---
@@ -71,7 +80,7 @@ class Search:
             return self.listings
 
         parser = Parser(self.r.content, self.db)
-        self.listings = parser.listings
+        page_one_new = parser.listings
         cards_seen = parser.card_count
 
         # --- 2. 200 but nothing parsed: stale selectors OR an anti-bot wall ---
@@ -100,17 +109,59 @@ class Search:
                 )
             return self.listings
 
+        # --- Pagination: results are split across &page=2..N. Read the total
+        #     page count from page 1's payload and walk the rest. ---
+        total_pages = min(max(1, parser.total_pages), self.MAX_PAGES)
+        raw_cards = cards_seen
+        seen_ids = set()
+        collected = []
+        for card in page_one_new:
+            if card['listing_id'] not in seen_ids:
+                seen_ids.add(card['listing_id'])
+                collected.append(card)
+
+        for page in range(2, total_pages + 1):
+            time.sleep(random.uniform(1.0, 2.5))   # be polite between pages
+            r = self._get_with_retry(self._with_page(self.url, page))
+            if r is None or r.status_code != 200:
+                code = r.status_code if r is not None else 'no response'
+                print(
+                    f'{get_datetime()} Page {page}: {code} — '
+                    f'stopping pagination early after {page - 1} page(s). '
+                    f'Keeping the {len(collected)} listing(s) collected so far.'
+                )
+                break
+            p = Parser(r.content, self.db)
+            raw_cards += p.card_count
+            for card in p.listings:
+                if card['listing_id'] not in seen_ids:
+                    seen_ids.add(card['listing_id'])
+                    collected.append(card)
+
+        self.listings = collected
+        page_note = f' across {total_pages} page(s)' if total_pages > 1 else ''
+
         # --- 3. Parsed listings, but none are new after dedup/filter ---
         if not self.listings:
             print(
-                f'{get_datetime()} Parsed {cards_seen} listing(s), but all were '
-                f'already seen or filtered out — no NEW listings.\n'
+                f'{get_datetime()} Parsed {raw_cards} listing(s){page_note}, but all '
+                f'were already seen or filtered out — no NEW listings.\n'
             )
             return self.listings
 
         # --- 4. Success ---
-        print(f'{get_datetime()} {len(self.listings)} new listing(s) found.\n')
+        print(
+            f'{get_datetime()} {len(self.listings)} new listing(s) found{page_note}.\n'
+        )
         return self.listings
+
+    # Safety cap so a payload glitch can't trigger hundreds of page fetches.
+    MAX_PAGES = 25
+
+    @staticmethod
+    def _with_page(url: str, page: int) -> str:
+        sep = '&' if '?' in url else '?'
+        return f'{url}{sep}page={page}'
 
     # ------------------------------------------------------------------ #
     # Anti-bot mitigation: warm-up + retry with backoff
@@ -144,18 +195,29 @@ class Search:
             if not proxied:
                 self._warm_up()
 
-            response = self.session.get(url, timeout=timeout)
-            if response.status_code == 200:
-                if i:
-                    print(f'{get_datetime()} Search succeeded on attempt {i + 1}.')
-                return response
-            if response.status_code not in (403, 429, 503):
-                return response  # a different error — don't hammer the server
+            try:
+                response = self.session.get(url, timeout=timeout)
+            except Exception as e:
+                # Timeouts / connection drops shouldn't crash the run — treat
+                # them as a failed attempt and back off like a block.
+                response = None
+                print(
+                    f'{get_datetime()} Request error on attempt '
+                    f'{i + 1}/{attempts}: {e}'
+                )
+            else:
+                if response.status_code == 200:
+                    if i:
+                        print(f'{get_datetime()} Search succeeded on attempt {i + 1}.')
+                    return response
+                if response.status_code not in (403, 429, 503):
+                    return response  # a different error — don't hammer the server
 
             if i < attempts - 1:
                 wait = 2 ** i + random.uniform(0, 1.5)
+                code = response.status_code if response is not None else 'timeout'
                 print(
-                    f'{get_datetime()} HTTP {response.status_code} on attempt '
+                    f'{get_datetime()} {code} on attempt '
                     f'{i + 1}/{attempts} — retrying in {wait:.1f}s.'
                 )
                 time.sleep(wait)
@@ -188,6 +250,8 @@ class Parser:
         self.existing_ids = db.get_existing_ids()
         self.card_count = 0          # raw listings parsed, before dedup/filter
         self._listings = None
+        self._flight_cache = None
+        self._total_pages = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -205,6 +269,26 @@ class Parser:
             self._listings = [card for card in parsed if self.filter(card)]
         return self._listings
 
+    @property
+    def total_pages(self) -> int:
+        """Number of result pages, read from the Flight payload's pagination
+        metadata. Falls back to ceil(totalResults / perPage), then 1."""
+        if self._total_pages is None:
+            self._total_pages = self._extract_total_pages()
+        return self._total_pages
+
+    def _extract_total_pages(self) -> int:
+        flight = self._flight_text()
+        m = re.search(r'"totalPages"\s*:\s*(\d+)', flight)
+        if m:
+            return max(1, int(m.group(1)))
+        tr = re.search(r'"totalResults"\s*:\s*(\d+)', flight)
+        pp = re.search(r'"perPage"\s*:\s*(\d+)', flight)
+        if tr and pp and int(pp.group(1)) > 0:
+            total, per = int(tr.group(1)), int(pp.group(1))
+            return max(1, (total + per - 1) // per)
+        return 1
+
     def filter(self, target) -> bool:
         if target['listing_id'] in self.existing_ids:
             return False
@@ -212,7 +296,62 @@ class Parser:
             target_value = target.get(key, '') or ''
             if any(substring in target_value for substring in substrings):
                 return False
+        if self._excluded_by_geo(target):
+            return False
         return True
+
+    @staticmethod
+    def _resolve_geo(geopoint, geo_rows):
+        """Resolve a listing's geoPoint into (latitude, longitude).
+
+        geoPoint is usually a Flight reference string like "$21" pointing to a
+        row {"latitude":..,"longitude":..}; occasionally it's the dict inline.
+        """
+        row = None
+        if isinstance(geopoint, dict):
+            row = geopoint
+        elif isinstance(geopoint, str) and geopoint.startswith('$'):
+            row = geo_rows.get(geopoint[1:])
+        if isinstance(row, dict):
+            return row.get('latitude'), row.get('longitude')
+        return None, None
+
+    @staticmethod
+    def _excluded_by_geo(target) -> bool:
+        """Drop a listing that falls on the excluded side of a geo boundary.
+
+        The boundary is a line through two (lat, lng) points along an avenue;
+        we interpolate the boundary longitude at the listing's latitude and
+        compare. Listings without coordinates are never dropped (we can't tell).
+        """
+        lat = target.get('latitude')
+        lng = target.get('longitude')
+        if lat is None or lng is None:
+            return False
+        neighborhood = target.get('neighborhood', '') or ''
+        for rule in getattr(Config, 'geo_filters', []):
+            if rule['neighborhood'] not in neighborhood:
+                continue
+            (lat1, lng1), (lat2, lng2) = rule['line']
+            side = rule.get('exclude', 'east')
+            if side in ('east', 'west'):
+                if lat2 == lat1:
+                    continue
+                # Longitude of the boundary line at this listing's latitude.
+                boundary = lng1 + (lng2 - lng1) * (lat - lat1) / (lat2 - lat1)
+                if side == 'east' and lng > boundary:
+                    return True
+                if side == 'west' and lng < boundary:
+                    return True
+            elif side in ('north', 'south'):
+                if lng2 == lng1:
+                    continue
+                boundary = lat1 + (lat2 - lat1) * (lng - lng1) / (lng2 - lng1)
+                if side == 'north' and lat > boundary:
+                    return True
+                if side == 'south' and lat < boundary:
+                    return True
+        return False
 
     # ------------------------------------------------------------------ #
     # Primary path: Next.js Flight JSON payload
@@ -221,6 +360,20 @@ class Parser:
         flight = self._flight_text()
         if not flight:
             return []
+
+        # Coordinates live in separate Flight rows referenced as geoPoint:"$<id>"
+        # e.g. the listing has "geoPoint":"$21" and elsewhere: 21:{"latitude":..,
+        # "longitude":..}. Build a lookup of those rows so we can resolve them.
+        geo_rows = {}
+        for gm in re.finditer(
+            r'(?:^|[^0-9a-zA-Z])([0-9a-f]{1,4}):'
+            r'(\{[^{}]*"latitude"[^{}]*"longitude"[^{}]*\})',
+            flight,
+        ):
+            try:
+                geo_rows[gm.group(1)] = json.loads(gm.group(2))
+            except (json.JSONDecodeError, ValueError):
+                pass
 
         out, seen = [], set()
         for data in self._objects_with_keys(flight, '"urlPath"', self._required_keys):
@@ -242,6 +395,8 @@ class Parser:
             unit = (data.get('displayUnit') or data.get('unit') or '').strip()
             address = f'{street} {unit}'.strip() if street else (unit or 'N/A')
 
+            lat, lng = self._resolve_geo(data.get('geoPoint'), geo_rows)
+
             out.append(
                 {
                     'listing_id': path,                      # unique per unit
@@ -253,13 +408,17 @@ class Parser:
                     'neighborhood': data.get('areaName') or 'N/A',
                     'beds': beds,
                     'baths': baths,
+                    'latitude': float(lat) if isinstance(lat, (int, float)) else None,
+                    'longitude': float(lng) if isinstance(lng, (int, float)) else None,
                 }
             )
         return out
 
     def _flight_text(self) -> str:
         """Concatenate the decoded string chunks from every
-        ``self.__next_f.push([...])`` script tag."""
+        ``self.__next_f.push([...])`` script tag (cached)."""
+        if self._flight_cache is not None:
+            return self._flight_cache
         chunks = []
         for script in self.soup.find_all('script'):
             txt = script.string or script.get_text() or ''
@@ -275,7 +434,8 @@ class Parser:
             for el in arr:
                 if isinstance(el, str):
                     chunks.append(el)
-        return ''.join(chunks)
+        self._flight_cache = ''.join(chunks)
+        return self._flight_cache
 
     def _objects_with_keys(self, text, anchor, required):
         """Yield parsed JSON objects that contain ``anchor`` and all
@@ -378,6 +538,8 @@ class Parser:
                     'neighborhood': neighborhood,
                     'beds': beds,
                     'baths': baths,
+                    'latitude': None,    # coordinates only available via Flight JSON
+                    'longitude': None,
                 }
             )
         return out

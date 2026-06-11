@@ -31,7 +31,8 @@ SHEET_FIELDS = [
     'elevator',
     'doorman',
     'date_available',
-    'days_listed',
+    'listed_date',
+    'days_on_market',   # filled in by the Apps Script as =TODAY()-listed_date
     'contact_first',
     'contact_last',
     'contact_company',
@@ -127,7 +128,8 @@ class SheetsWriter:
             'elevator': listing.get('elevator', 'N/A'),
             'doorman': listing.get('doorman', 'N/A'),
             'date_available': listing.get('date_available', 'N/A'),
-            'days_listed': listing.get('days_listed', 'N/A'),
+            'listed_date': listing.get('listed_date', 'N/A'),
+            'days_on_market': '',   # placeholder; Apps Script writes the formula
             'contact_first': first or 'N/A',
             'contact_last': last or 'N/A',
             'contact_company': listing.get('contact_company', 'N/A'),

@@ -25,7 +25,7 @@ Search ──▶ DetailFetcher ──▶ SheetsWriter.push() ──▶ Apps Scri
 ## Sheet columns
 
 `Date Added · Address · Neighborhood · Price · Beds · Baths · Laundry ·
-Elevator · Doorman · Available · Days on Market · Contact First ·
+Elevator · Doorman · Available · Listed Date · Days on Market · Contact First ·
 Contact Last · Contact Company · Contact Phone · Listing (clickable "View") ·
 Message · Listing ID`
 
@@ -35,7 +35,11 @@ Message · Listing ID`
 - **Contact First / Contact Last** — the contact name split on the first space
 - **Contact Phone** — plain 10 digits (e.g. `7186827712`), so Sheets doesn't
   read a leading `+` as a formula
-- **Days on Market** — `0` for units available today/now
+- **Listed Date** — the actual date the unit was listed (derived as today minus
+  StreetEasy's days-on-market count at scrape time).
+- **Days on Market** — a live formula `=TODAY()-Listed Date`, so it stays
+  current every day you open the sheet instead of freezing at scrape time.
+  Blank when the listed date is unknown.
 - **Message** — a ready-to-send viewing request you can copy straight out of the
   cell, e.g.:
 

@@ -15,10 +15,10 @@ class Config:
         'max_beds': 1,
         'baths': 1,
         'areas': [
-            #'Carroll Gardens',
+            'Carroll Gardens',
             #'Clinton Hill',
             #'Cobble Hill',
-            #'Fort Greene',
+            'Fort Greene',
             #'Gowanus',
             #'Greenpoint',
             #'Park Slope',
@@ -29,13 +29,14 @@ class Config:
             'Tribeca',
             'West Village',
             'Hudson Square',
-            'Gramercy Park'
+            'Gramercy Park',
             #'Bedford-Stuyvesant',
             #'Boerum Hill',
             #'DUMBO',
             #'Downtown Brooklyn',
-            #'Brooklyn Heights',
-            #'Upper East Side',
+            'Brooklyn Heights',
+            'Lenox Hill',
+            #'Upper East Side'
         ],
         'amenities': [
             #'pets',
@@ -48,6 +49,11 @@ class Config:
             # 'gym',
         ],
         'no_fee': False,
+
+        # Omit listings that have been on the market longer than this many days.
+        # Set to None (or a large number) to disable. Days-on-market comes from
+        # each listing's detail page, so this is applied after enrichment.
+        'max_days_on_market': 20,
 
         # --- Optional filters (remove the key or set to '' to disable) ---
 
@@ -76,7 +82,7 @@ class Config:
             # 'Atlantic',
         ],
         'neighborhood': [
-            #'Ocean Hill',
+            'Downtown Brooklyn',
             #'Flatbush',
             #'Bushwick',
             #'Weeksville',
@@ -84,6 +90,24 @@ class Config:
             #'New Development',
         ],
     }
+
+    # -------------------------------------------------------------------
+    # Geographic carve-outs — drop listings in a neighborhood that fall on the
+    # wrong side of a street. Manhattan avenues run at an angle, so the boundary
+    # is a LINE defined by two (lat, lng) points along that avenue, plus the
+    # side to exclude ('east' / 'west' / 'north' / 'south').
+    #
+    # To tune a boundary precisely: open Google Maps, right-click two points on
+    # the avenue (one near each end of the neighborhood), and copy the lat/lng.
+    # -------------------------------------------------------------------
+    geo_filters = [
+        {
+            'neighborhood': 'Lenox Hill',
+            # Two points along 3rd Ave through Lenox Hill (approx — tune above).
+            'line': ((40.7616, -73.9659), (40.7706, -73.9569)),
+            'exclude': 'east',   # drop anything east of 3rd Ave
+        },
+    ]
 
     # A few *consistent* desktop-Chrome identities. The UA string, the
     # sec-ch-ua client hints, and the platform all agree — a mismatch between
